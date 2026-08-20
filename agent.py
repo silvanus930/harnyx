@@ -141,9 +141,17 @@ MIN_USABLE_ANSWER_CHARS = 20
 # at runtime and drops any pair the platform no longer allows, per the miner
 # README: "Treat allowed_llm_provider_models[provider] as the runtime source
 # of truth ... instead of hardcoding a fixed list."
+# 2026-08-20: reordered -- measured across 23 real task runs on two separate
+# days (18 local-eval tasks on the 18th, 5 BrowseComp benchmark items on the
+# 20th), chutes/GLM-5.2-TEE succeeded on only 5 of 165 total LLM calls (~3%)
+# before falling through to openrouter on a 429 "Infrastructure is at maximum
+# capacity" error every other time. Putting the provider that fails ~97% of
+# the time first means nearly every real call pays for a timeout/retry
+# before reaching the one that actually answers. openrouter/deepseek-v3.2 is
+# now first since it's the one that has actually been reachable.
 DEFAULT_MODEL_WATERFALL: tuple[tuple[str, str], ...] = (
-    ("chutes", "zai-org/GLM-5.2-TEE"),
     ("openrouter", "deepseek/deepseek-v3.2"),
+    ("chutes", "zai-org/GLM-5.2-TEE"),
 )
 TOOLING_INFO_TIMEOUT_SECONDS = 8.0
 
