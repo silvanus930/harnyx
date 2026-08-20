@@ -982,17 +982,19 @@ def _tooling_info_result(allowed: dict[str, list[str]]) -> ToolCallResponse[dict
     )
 
 
-def test_default_waterfall_tries_openrouter_then_chutes(agent: ModuleType) -> None:
+def test_default_waterfall_diversifies_openrouter_before_crossing_to_chutes(agent: ModuleType) -> None:
     # 2026-08-20: measured across 23 real task runs on two separate days,
     # chutes/GLM-5.2-TEE succeeded on only 5 of 165 LLM calls (~3%) before
     # falling through to openrouter on a 429 capacity error. openrouter must
     # stay first so a real call doesn't pay for a doomed chutes attempt.
-    # ai_gateway isn't in the waterfall until a credential is actually
-    # stored -- an unconfigured provider would just be another guaranteed
-    # failed attempt ahead of chutes, the same problem this reorder fixed.
+    # Second tier diversifies within openrouter itself (a second model on
+    # the provider that's actually been reliable) before crossing to
+    # chutes as the third, cross-provider fallback -- both qwen/qwen3.8-27b
+    # ids are confirmed in the miner README's allowed_llm_provider_models.
     assert agent.DEFAULT_MODEL_WATERFALL == (
         ("openrouter", "deepseek/deepseek-v3.2"),
-        ("chutes", "zai-org/GLM-5.2-TEE"),
+        ("openrouter", "qwen/qwen3.8-27b"),
+        ("chutes", "Qwen/Qwen3.8-27B-TEE"),
     )
 
 

@@ -154,12 +154,25 @@ MIN_USABLE_ANSWER_CHARS = 20
 # openrouter, LANE_B=ai_gateway setup), but no ai_gateway credential is
 # stored yet -- an unconfigured provider in the waterfall just means a
 # guaranteed-fail attempt eats a retry before falling through, the same
-# problem this whole waterfall was reordered to avoid. Dropped back to two
-# tiers until the credential exists; re-add ai_gateway once
-# `harnyx-miner-config --provider ai_gateway --api-key <key>` is set.
+# problem this whole waterfall was reordered to avoid. Drop it and re-add
+# once `harnyx-miner-config --provider ai_gateway --api-key <key>` is set.
+# 2026-08-20: three tiers -- openrouter/deepseek-v3.2 stays first (100%
+# real-world success rate across every run measured this session). Second
+# tier diversifies WITHIN openrouter (a second, different model on the one
+# provider that's actually been reliable) rather than crossing providers
+# immediately; third tier repeats that same model on chutes for one more
+# cross-provider fallback. qwen/qwen3.8-27b (both provider ids confirmed in
+# the miner README's allowed_llm_provider_models for openrouter AND
+# chutes/Qwen3.8-27B-TEE) is a much smaller model than deepseek-v3.2 --
+# every competitor script reviewed this session (champion, UID171) only
+# uses a 27B-class model for narrow sub-tasks (audit/classification), never
+# as the main research-loop model -- but since it only ever gets exercised
+# after deepseek-v3.2 fails on openrouter, the exposure is bounded to a
+# rare double-failure, same tradeoff already made for chutes/ai_gateway.
 DEFAULT_MODEL_WATERFALL: tuple[tuple[str, str], ...] = (
     ("openrouter", "deepseek/deepseek-v3.2"),
-    ("chutes", "zai-org/GLM-5.2-TEE"),
+    ("openrouter", "qwen/qwen3.8-27b"),
+    ("chutes", "Qwen/Qwen3.8-27B-TEE"),
 )
 TOOLING_INFO_TIMEOUT_SECONDS = 8.0
 
