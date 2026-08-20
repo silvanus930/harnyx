@@ -149,17 +149,16 @@ MIN_USABLE_ANSWER_CHARS = 20
 # the time first means nearly every real call pays for a timeout/retry
 # before reaching the one that actually answers. openrouter/deepseek-v3.2 is
 # now first since it's the one that has actually been reachable.
-# 2026-08-20: added ai_gateway/zai-glm-5.2-fast as a third-priority pair,
-# ahead of chutes -- this mirrors the current champion's own production
-# setup exactly (their LANE_A=openrouter, LANE_B=ai_gateway, never chutes),
-# and their own code comments cite real measured cost/score numbers on this
-# specific model. chutes stays as the last-resort tier rather than being
-# dropped -- it did succeed 5/165 times in our measurements, and since it's
-# only ever reached after both of the above fail, keeping it costs nothing
-# in the common case while adding real redundancy for a rare double-failure.
+# 2026-08-20: ai_gateway/zai-glm-5.2-fast was briefly added as a
+# third-priority pair (mirroring the current champion's own LANE_A=
+# openrouter, LANE_B=ai_gateway setup), but no ai_gateway credential is
+# stored yet -- an unconfigured provider in the waterfall just means a
+# guaranteed-fail attempt eats a retry before falling through, the same
+# problem this whole waterfall was reordered to avoid. Dropped back to two
+# tiers until the credential exists; re-add ai_gateway once
+# `harnyx-miner-config --provider ai_gateway --api-key <key>` is set.
 DEFAULT_MODEL_WATERFALL: tuple[tuple[str, str], ...] = (
     ("openrouter", "deepseek/deepseek-v3.2"),
-    ("ai_gateway", "zai/glm-5.2-fast"),
     ("chutes", "zai-org/GLM-5.2-TEE"),
 )
 TOOLING_INFO_TIMEOUT_SECONDS = 8.0
