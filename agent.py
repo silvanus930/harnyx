@@ -420,7 +420,22 @@ _LOOP_SYSTEM_PROMPT = (
     "note_evidence pointing at the exact row, your citation can silently "
     "land on the wrong one even while your stated answer is completely "
     "correct -- and an unsupported correct answer is scored the same as a "
-    "wrong one.\n\n"
+    "wrong one. "
+    "UNIQUENESS / \"ONLY ONE\" PROOF: when the question requires showing "
+    "that exactly one entry satisfies a criterion (\"the only one with "
+    "more than one...\", \"exactly one entry records...\"), a correct "
+    "chosen entity is not enough on its own -- the judge also needs to "
+    "see that rivals were checked and failed the criterion. Call "
+    "`note_evidence` on (a) the winning row and (b) a small set of "
+    "eliminated near-misses that show the discriminating field (e.g. "
+    "other repealed entries that have only one repealing by-law). Do "
+    "NOT dump the entire register -- a handful of clear eliminations "
+    "plus the winner is enough, and flooding citations can hit platform "
+    "size limits. Measured on a real task: our JSON matched the "
+    "reference exactly (same name, address, two repealing by-laws) and "
+    "still scored zero because we cited only sparse register slices "
+    "while the reference cited the winner plus several one-by-law "
+    "eliminations that proved uniqueness.\n\n"
     "ANSWERING: when you have enough evidence, respond with your final "
     "answer as plain text and make no further tool calls. Follow the "
     "question's literal formatting instructions exactly (notation style, "
@@ -473,6 +488,13 @@ _LOOP_SYSTEM_PROMPT = (
     "identical count whose citations cover every single one. When you find "
     "the qualifying detail for each member, call note_evidence for it right "
     "away so the final citation can point at that member specifically. "
+    "PER-MEMBER CITATION IS MANDATORY on enumeration answers: measured on "
+    "a real task, our JSON listed every correct id ([9,10,19,20,21,23]) "
+    "and still scored zero because one broad page citation did not show "
+    "each member's qualifying label, while the reference had a tight "
+    "citation per recommendation. Prefer one focused note_evidence quote "
+    "per listed member over one giant slice that only grazes some of "
+    "them. "
     "State each qualifying item once -- do not restate the same list twice "
     "in different formats (e.g. a numbered list immediately followed by "
     "the identical bullet list); that reads as padding even when every "
@@ -665,6 +687,10 @@ _CAP_ENUM_TERMS = (
     "list every", "list all", "enumerate", "each of the", "all of the",
     "every entry", "every item", "which of the following", "find all",
 )
+_CAP_UNIQUE_TERMS = (
+    "only one", "exactly one", "the only", "more than one", "at least two",
+    "unique", "sole ", "just one",
+)
 _CAP_PREMISE_HINT = (
     "This question may embed a premise that is stale or no longer "
     "accurate -- verify every named fact against current evidence before "
@@ -689,8 +715,16 @@ _CAP_SORT_HINT = (
 _CAP_ENUM_HINT = (
     "This needs an exhaustive enumeration -- after your first pass, "
     "re-scan the same source for any remaining same-series members before "
-    "committing. A partial list of correct items still scores zero when "
-    "the reference found more."
+    "committing. Then call note_evidence once per listed member so each "
+    "qualifying label is visible in the final citations; a correct list "
+    "with only a shared broad page citation still loses to a reference "
+    "that cites every member."
+)
+_CAP_UNIQUE_HINT = (
+    "This asks for a uniqueness claim (only one / more than one / "
+    "exactly one). Cite the winning row AND a few eliminated near-misses "
+    "that fail the discriminating criterion -- do not stop at the winner "
+    "alone, and do not dump the entire source."
 )
 _CAP_STRUCT_HINT = (
     "A structured answer is requested -- match every field's meaning and "
@@ -712,6 +746,8 @@ def _capability_signal_hints(question: str, *, has_output_schema: bool) -> str |
         hints.append(_CAP_SORT_HINT)
     if any(term in lowered for term in _CAP_ENUM_TERMS):
         hints.append(_CAP_ENUM_HINT)
+    if any(term in lowered for term in _CAP_UNIQUE_TERMS):
+        hints.append(_CAP_UNIQUE_HINT)
     if has_output_schema:
         hints.append(_CAP_STRUCT_HINT)
     if not hints:
@@ -1650,7 +1686,7 @@ async def _audit_answer(question: str, answer: str, store: EvidenceStore, state:
             "role": "system",
             "content": (
                 "You are a strict answer auditor. Check the draft answer "
-                "against the question and the evidence on twelve things: "
+                "against the question and the evidence on thirteen things: "
                 "(1) FORMAT -- does it follow the question's literal "
                 "formatting/precision instructions exactly (notation, "
                 "digit precision, ordering, units), with no rounding or "
@@ -1671,7 +1707,9 @@ async def _audit_answer(question: str, answer: str, store: EvidenceStore, state:
                 "individual item was checked and cited, AND that the scan "
                 "was exhaustive (no remaining same-series members left "
                 "unchecked in the source) -- a correct-looking partial "
-                "list of 4 when 6 qualify fails this; (6) SOURCE DATE -- if the "
+                "list of 4 when 6 qualify fails this; also fail this if "
+                "the listed members are correct but only one shared broad "
+                "citation backs them instead of per-member proof; (6) SOURCE DATE -- if the "
                 "question anchors to one specific dated snapshot or "
                 "edition, does the cited evidence's own stated date "
                 "actually match that date rather than a later live version; "
@@ -1710,9 +1748,13 @@ async def _audit_answer(question: str, answer: str, store: EvidenceStore, state:
                 "date fields; (12) EXCLUSION -- if the question says to "
                 "exclude a named category, region, or flagged item from a "
                 "tally or list, confirm that item is actually left out of "
-                "the final count. "
+                "the final count; (13) UNIQUENESS PROOF -- if the question "
+                "requires proving exactly one / the only entry meets a "
+                "criterion, does the draft's evidence also show a few "
+                "eliminated near-misses that fail that criterion, not only "
+                "the winner. "
                 "If "
-                "the draft fully passes all twelve, repeat it unchanged, "
+                "the draft fully passes all thirteen, repeat it unchanged, "
                 "including every [[n]] citation marker exactly as written. "
                 "If it fails one, output a corrected version that fixes "
                 "only that issue and keeps every [[n]] marker in place -- "
