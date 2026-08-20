@@ -346,7 +346,19 @@ _LOOP_SYSTEM_PROMPT = (
     "items in front of you, write them as Python lists in `compute` and let "
     "it compute the actual intersection/difference, rather than tracking "
     "overlap by eye across a long list, which is exactly where "
-    "cross-referencing mistakes happen.\n\n"
+    "cross-referencing mistakes happen. The same discipline applies to "
+    "TALLYING a condition across many categories (e.g. \"which region had "
+    "the most decreases across these 9 regions and 14 measures\" -- over a "
+    "hundred individual yes/no data points): once you've read every "
+    "individual value, write each one down as a Python data structure "
+    "(e.g. a dict of category -> list of booleans or a list of tuples) and "
+    "let `compute` do the actual counting and comparison, rather than "
+    "adding up a long tally by eye across the whole set. Measured on a "
+    "real task: an answer correctly extracted every individual fact but "
+    "still miscounted the final tally by hand (13 vs. the correct 12) and "
+    "named the wrong region as a result -- the raw facts were all right "
+    "and the answer still scored zero, because the arithmetic on top of "
+    "them was wrong.\n\n"
     "PROVING: the instant you read the specific number, name, or fact that "
     "settles part of the answer, call `note_evidence` with the exact "
     "evidence index and the verbatim text (copy it, don't paraphrase) -- "
@@ -564,6 +576,66 @@ LOOP_TOOLS: tuple[dict[str, Any], ...] = (
     _NOTE_EVIDENCE_TOOL,
 )
 
+# 2026-08-20: proactive question-type detection, adapted from a pattern
+# found in the current champion's own source (a similar term-table ->
+# targeted-hint mechanism, fired before the loop starts rather than only
+# reacting after a bad answer ships). Our system prompt already covers
+# premise/time/calculation/structured-output discipline in general terms,
+# but a model doesn't reliably apply every relevant instruction from one
+# long prompt to every question -- surfacing the single most relevant
+# reminder right at the start, cheaply (pure keyword match, no LLM call),
+# is a second, complementary line of defense, not a replacement for the
+# general prompt.
+_CAP_PREMISE_TERMS = (
+    "used to be", "former ", "formerly", "originally", "was known as",
+    "renamed", "no longer", "used to have", "previously", "is it true that",
+    "isn't ", "wasn't ", "still ",
+)
+_CAP_TIME_TERMS = (
+    " as of ", "currently", "latest", "most recent", "which version",
+    "effective date", "updated", "revision", "since when",
+)
+_CAP_CALC_TERMS = (
+    "how many", "total", "difference", "percentage", "percent", "sum of",
+    "average", "ratio", "combined", "how much more", "how much less",
+)
+_CAP_PREMISE_HINT = (
+    "This question may embed a premise that is stale or no longer "
+    "accurate -- verify every named fact against current evidence before "
+    "answering, and if the premise is false, state the correction with "
+    "its citation, then still answer the underlying intent."
+)
+_CAP_TIME_HINT = (
+    "Sources here may disagree only because they cover different dates or "
+    "versions -- name the scope each source covers and reconcile any "
+    "conflict explicitly rather than silently picking one."
+)
+_CAP_CALC_HINT = (
+    "This needs a real computed answer -- use the `compute` tool on the "
+    "cited operands rather than doing the arithmetic yourself or by eye."
+)
+_CAP_STRUCT_HINT = (
+    "A structured answer is requested -- match every field's meaning and "
+    "type exactly, and if any field is a list, don't leave it empty "
+    "unless you're actually confident zero items qualify."
+)
+
+
+def _capability_signal_hints(question: str, *, has_output_schema: bool) -> str | None:
+    lowered = (question or "").lower()
+    hints: list[str] = []
+    if any(term in lowered for term in _CAP_PREMISE_TERMS):
+        hints.append(_CAP_PREMISE_HINT)
+    if any(term in lowered for term in _CAP_TIME_TERMS):
+        hints.append(_CAP_TIME_HINT)
+    if any(term in lowered for term in _CAP_CALC_TERMS):
+        hints.append(_CAP_CALC_HINT)
+    if has_output_schema:
+        hints.append(_CAP_STRUCT_HINT)
+    if not hints:
+        return None
+    return "\n".join(hints)
+
 
 @dataclass(slots=True)
 class RunState:
@@ -590,6 +662,17 @@ class RunState:
         return self.elapsed() >= HARD_DEADLINE_S
 
 
+def _locate_span_for_quote(note: str, quote: str, margin: int = 260) -> tuple[int, int] | None:
+    pos = note.find(quote)
+    if pos == -1:
+        pos = note.lower().find(quote.lower())
+    if pos == -1:
+        return None
+    start = max(0, pos - margin)
+    end = min(len(note), pos + len(quote) + margin)
+    return start, end
+
+
 @dataclass(frozen=True, slots=True)
 class Evidence:
     index: int
@@ -608,6 +691,11 @@ class Evidence:
     # _build_citations when present, since these are model-verified rather
     # than keyword-density guesses.
     retained_spans: tuple[tuple[int, int], ...] = ()
+    # The verbatim quote text behind each retained span, independent of any
+    # specific note's byte offsets. Kept alongside retained_spans so
+    # replace_item can re-locate proven proof in a freshly re-fetched note
+    # instead of silently discarding it -- see replace_item.
+    retained_quotes: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -675,6 +763,24 @@ class EvidenceStore:
         # fetches of the "same" URL are not guaranteed to return byte-
         # identical text, so unioning old offsets against new content would
         # silently point at the wrong characters.
+        # 2026-08-20: real gap flagged by code review, independently in two
+        # finder passes -- this used to silently drop retained_spans (the
+        # model's own note_evidence proof) on every re-fetch, since a fresh
+        # Evidence carried no memory of them. retained_quotes are the
+        # verbatim quote TEXT, not byte offsets, so they survive content
+        # shifting between fetches -- re-locate each one in the NEW note
+        # instead of just discarding it; a quote no longer present in this
+        # round is correctly dropped rather than pointing at wrong text.
+        old = self.items[index]
+        recovered_spans = tuple(
+            sorted(
+                {
+                    span
+                    for quote in old.retained_quotes
+                    if (span := _locate_span_for_quote(note or "", quote)) is not None
+                }
+            )
+        )
         self.items[index] = Evidence(
             index=index,
             receipt_id=receipt_id,
@@ -683,11 +789,14 @@ class EvidenceStore:
             title=title,
             note=note,
             relevant_spans=relevant_spans,
+            retained_spans=recovered_spans,
+            retained_quotes=old.retained_quotes,
         )
 
-    def add_retained_span(self, index: int, span: tuple[int, int]) -> None:
+    def add_retained_span(self, index: int, span: tuple[int, int], quote: str) -> None:
         item = self.items[index]
-        combined = tuple(sorted(set(item.retained_spans) | {span}))
+        combined_spans = tuple(sorted(set(item.retained_spans) | {span}))
+        combined_quotes = item.retained_quotes if quote in item.retained_quotes else (*item.retained_quotes, quote)
         self.items[index] = Evidence(
             index=item.index,
             receipt_id=item.receipt_id,
@@ -696,7 +805,8 @@ class EvidenceStore:
             title=item.title,
             note=item.note,
             relevant_spans=item.relevant_spans,
-            retained_spans=combined,
+            retained_spans=combined_spans,
+            retained_quotes=combined_quotes,
         )
 
 
@@ -714,7 +824,9 @@ async def _run_query(query: Query) -> Response:
     store = EvidenceStore()
 
     try:
-        loop_answer = await _run_loop(query.text, store, state)
+        loop_answer = await _run_loop(
+            query.text, store, state, has_output_schema=query.output_schema is not None
+        )
     except Exception:
         loop_answer = None
 
@@ -758,13 +870,18 @@ async def _resolve_model_waterfall() -> tuple[tuple[str, str], ...]:
 # --------------------------------------------------------------------------
 
 
-async def _run_loop(question: str, store: EvidenceStore, state: RunState) -> str | None:
+async def _run_loop(
+    question: str, store: EvidenceStore, state: RunState, *, has_output_schema: bool = False
+) -> str | None:
     keywords = _keywords_from(question)
     anchors = _anchors_from(question)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _LOOP_SYSTEM_PROMPT},
         {"role": "user", "content": question},
     ]
+    signal_hints = _capability_signal_hints(question, has_output_schema=has_output_schema)
+    if signal_hints:
+        messages.append({"role": "system", "content": signal_hints})
     for _turn in range(MAX_LOOP_TURNS):
         if state.past_soft_deadline() or state.budget_is_low():
             break
@@ -947,10 +1064,8 @@ def _tool_note_evidence(raw_index: Any, quote: str, store: EvidenceStore) -> str
     quote = quote.strip()
     if not quote:
         return json.dumps({"noted": False, "reason": "quote is empty"})
-    pos = item.note.find(quote)
-    if pos == -1:
-        pos = item.note.lower().find(quote.lower())
-    if pos == -1:
+    span = _locate_span_for_quote(item.note, quote)
+    if span is None:
         return json.dumps(
             {
                 "noted": False,
@@ -960,10 +1075,7 @@ def _tool_note_evidence(raw_index: Any, quote: str, store: EvidenceStore) -> str
                 ),
             }
         )
-    margin = 260
-    start = max(0, pos - margin)
-    end = min(len(item.note), pos + len(quote) + margin)
-    store.add_retained_span(index, (start, end))
+    store.add_retained_span(index, span, quote)
     return json.dumps({"noted": True})
 
 
@@ -1739,7 +1851,13 @@ async def _build_structured_output(
         "re-deriving or approximating them. Only use a value that is "
         "actually present in the evidence below -- never invent a "
         "placeholder (like -1, 0, or \"unknown\") for a field you could "
-        "not find and pass it off as real.\n\n"
+        "not find and pass it off as real. If a field is a LIST or ARRAY, "
+        "do not return it empty just because you are not fully certain "
+        "every candidate qualifies -- if the evidence below names real "
+        "items that plausibly satisfy the condition, include them. An "
+        "empty array scores the same as a wrong one; only return one if "
+        "you are actually confident zero real items satisfy the "
+        "condition, not merely because verification felt incomplete.\n\n"
         f"Question: {query.text}\n\nEvidence:\n{evidence_block}\n\n"
         f"Reference answer to structure (for content, not format): {text_answer}"
     )

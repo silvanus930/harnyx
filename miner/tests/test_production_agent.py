@@ -1056,6 +1056,66 @@ async def test_query_uses_resolved_waterfall_for_loop_turns(
     assert all(provider == "openrouter" for provider in seen_providers)
 
 
+def test_capability_signal_hints_detects_premise_check_question(agent: ModuleType) -> None:
+    hints = agent._capability_signal_hints(
+        "Is it true that the building formerly housed the city archive?", has_output_schema=False
+    )
+    assert hints is not None
+    assert "stale" in hints
+
+
+def test_capability_signal_hints_detects_calculation_question(agent: ModuleType) -> None:
+    hints = agent._capability_signal_hints(
+        "What is the total percentage increase between the two years?", has_output_schema=False
+    )
+    assert hints is not None
+    assert "compute" in hints
+
+
+def test_capability_signal_hints_fires_on_output_schema_regardless_of_wording(agent: ModuleType) -> None:
+    hints = agent._capability_signal_hints("Name the tallest building.", has_output_schema=True)
+    assert hints is not None
+    assert "structured answer" in hints
+
+
+def test_capability_signal_hints_combines_multiple_matches(agent: ModuleType) -> None:
+    hints = agent._capability_signal_hints(
+        "As of the latest report, what is the total combined figure?", has_output_schema=False
+    )
+    assert hints is not None
+    assert "compute" in hints
+    assert "different dates" in hints
+
+
+def test_capability_signal_hints_returns_none_for_plain_question(agent: ModuleType) -> None:
+    hints = agent._capability_signal_hints("Who wrote this book?", has_output_schema=False)
+    assert hints is None
+
+
+async def test_run_loop_injects_capability_hint_as_extra_system_message(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen_messages: list[list[dict[str, Any]]] = []
+
+    async def fake_llm_chat(**kwargs: object) -> LlmChatResult:
+        seen_messages.append(list(kwargs["messages"]))  # type: ignore[arg-type]
+        return _text_chat_result("A short answer with no evidence needed.")
+
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+
+    async def failing_search_web(*_: object, **__: object) -> ToolCallResponse[SearchWebSearchResponse]:
+        raise RuntimeError("no search needed for this test")
+
+    monkeypatch.setattr(agent, "search_web", failing_search_web)
+
+    await agent.query(Query(text="What is the total percentage increase?"))
+
+    assert seen_messages
+    system_messages = [m["content"] for m in seen_messages[0] if m["role"] == "system"]
+    assert len(system_messages) == 2
+    assert "compute" in system_messages[1]
+
+
 def test_compute_tool_does_exact_decimal_arithmetic_without_precision_loss(agent: ModuleType) -> None:
     # The exact bug this tool exists to prevent: LLM-native arithmetic
     # truncated 8.31446261815324 down to 8.314462618 on a real local-eval run.
@@ -1308,13 +1368,73 @@ def test_build_citations_prefers_retained_spans_over_relevant_spans(agent: Modul
         note=note,
         relevant_spans=((guess_start, guess_end),),
     )
-    store.add_retained_span(0, (proof_start, proof_end))
+    store.add_retained_span(0, (proof_start, proof_end), real_proof)
 
     _text, citations = agent._build_citations("q", "Answer citing [[0]].", store)
 
     assert citations is not None
     slice_ = citations[0].slices[0]
     assert slice_.start == proof_start
+
+
+def test_replace_item_relocates_retained_quote_in_new_note_instead_of_dropping_it(
+    agent: ModuleType,
+) -> None:
+    # Real gap flagged by code review, independently in two finder passes:
+    # replace_item used to silently drop retained_spans (the model's own
+    # note_evidence proof) on every re-fetch of the same URL, since a fresh
+    # Evidence carried no memory of them -- the proof just vanished even
+    # though the proven fact might still be present in the new content.
+    store = agent.EvidenceStore()
+    quote = "the decisive figure is 42.7 percent"
+    old_note = "padding " * 50 + quote + " more padding" * 50
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note=old_note)
+    note_result = json.loads(agent._tool_note_evidence(0, quote, store))
+    assert note_result["noted"] is True
+    assert store.get(0).retained_spans
+
+    # Re-fetch of the same URL: different padding, but the proven quote is
+    # still present somewhere in the new content.
+    new_note = "different padding entirely " * 40 + quote + " trailing content" * 40
+    store.replace_item(
+        0,
+        receipt_id="r2",
+        result_id="r-2",
+        url="https://example.com/a",
+        title="T",
+        note=new_note,
+        relevant_spans=(),
+    )
+
+    item = store.get(0)
+    assert item.retained_quotes == (quote,)
+    assert item.retained_spans, "retained proof must survive a re-fetch, not be silently dropped"
+    start, end = item.retained_spans[0]
+    assert quote in new_note[start:end]
+
+
+def test_replace_item_drops_span_for_quote_no_longer_present(agent: ModuleType) -> None:
+    store = agent.EvidenceStore()
+    quote = "the decisive figure is 42.7 percent"
+    old_note = "padding " * 50 + quote + " more padding" * 50
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note=old_note)
+    agent._tool_note_evidence(0, quote, store)
+
+    store.replace_item(
+        0,
+        receipt_id="r2",
+        result_id="r-2",
+        url="https://example.com/a",
+        title="T",
+        note="completely different content with no trace of the old figure",
+        relevant_spans=(),
+    )
+
+    item = store.get(0)
+    # The quote itself is remembered (a later re-fetch could still recover
+    # it), but no span is fabricated for content that doesn't contain it.
+    assert item.retained_quotes == (quote,)
+    assert item.retained_spans == ()
 
 
 def test_answer_anchors_extracts_proper_nouns_and_code_tokens(agent: ModuleType) -> None:
