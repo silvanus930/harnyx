@@ -1869,6 +1869,28 @@ def _validate_against_schema(value: Any, schema: Any, *, _path: str = "value") -
                     error = _validate_against_schema(value[key], subschema, _path=f"{_path}.{key}")
                     if error:
                         return error
+        # 2026-08-20: real diagnosed loss, traced via recorded validator
+        # results -- a task with additionalProperties: false failed with
+        # "miner returned invalid response payload" on two separate runs,
+        # under two different provider conditions, with our own validation
+        # showing nothing wrong. Root cause: this hand-rolled check is only
+        # a best-effort SANDBOX-side self-check (jsonschema isn't in the
+        # allowed import subset); the real, authoritative Draft 2020-12
+        # validation happens at the trusted host, OUTSIDE our own try/except,
+        # using the actual jsonschema library -- so a response that passes
+        # our checks but violates a constraint we don't enforce (like this
+        # one) ships anyway and gets rejected downstream where we can never
+        # see why. Catch the extra-field case here so the repair-retry loop
+        # gets a real chance to fix it before we ever return.
+        if schema.get("additionalProperties") is False and isinstance(properties, dict):
+            extra = [key for key in value if key not in properties]
+            if extra:
+                return (
+                    f"{_path} contains field(s) not allowed by the schema: "
+                    f"{', '.join(sorted(extra))} -- this schema does not "
+                    "permit extra properties. Remove them; only use the "
+                    "exact field names listed in the schema."
+                )
         # 2026-08-18: real diagnosed loss, three independent instances (our
         # own run plus two from the current champion's real production
         # history) -- every required field simultaneously left at its

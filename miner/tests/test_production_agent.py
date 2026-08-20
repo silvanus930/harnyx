@@ -733,6 +733,130 @@ async def test_structured_output_repair_retry_rejects_all_default_object(
     }
 
 
+def test_validate_against_schema_rejects_unexpected_field(agent: ModuleType) -> None:
+    # Real diagnosed loss, traced via recorded validator results -- a task
+    # with additionalProperties: false failed "miner returned invalid
+    # response payload" on two separate runs under two different provider
+    # conditions, with our own validation showing nothing wrong. Root cause:
+    # the real, authoritative Draft 2020-12 check (including
+    # additionalProperties) runs at the trusted host with the actual
+    # jsonschema library, outside our own sandboxed try/except -- our
+    # hand-rolled checker (jsonschema isn't importable in the sandbox) has
+    # to catch the same violations itself or a response that looks fine to
+    # us ships anyway and gets silently rejected downstream.
+    schema = {
+        "type": "object",
+        "required": ["matches"],
+        "properties": {"matches": {"type": "array", "items": {"type": "string"}}},
+        "additionalProperties": False,
+    }
+
+    error = agent._validate_against_schema({"matches": [], "confidence": "high"}, schema)
+
+    assert error is not None
+    assert "confidence" in error
+
+
+def test_validate_against_schema_rejects_unexpected_field_in_array_item(agent: ModuleType) -> None:
+    schema = {
+        "type": "object",
+        "required": ["matches"],
+        "properties": {
+            "matches": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["artform", "organisation", "amount_pounds"],
+                    "properties": {
+                        "artform": {"type": "string"},
+                        "organisation": {"type": "string"},
+                        "amount_pounds": {"type": "integer"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "additionalProperties": False,
+    }
+    value = {
+        "matches": [
+            {"artform": "Music", "organisation": "Example Org", "amount_pounds": 5000, "note": "unexpected"}
+        ]
+    }
+
+    error = agent._validate_against_schema(value, schema)
+
+    assert error is not None
+    assert "note" in error
+
+
+def test_validate_against_schema_allows_exact_match_with_additional_properties_false(agent: ModuleType) -> None:
+    schema = {
+        "type": "object",
+        "required": ["matches"],
+        "properties": {"matches": {"type": "array", "items": {"type": "string"}}},
+        "additionalProperties": False,
+    }
+
+    error = agent._validate_against_schema({"matches": ["a", "b"]}, schema)
+
+    assert error is None
+
+
+async def test_structured_output_repair_retry_rejects_extra_field_not_in_schema(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    call_count = {"n": 0}
+
+    async def fake_llm_chat(**__: object) -> LlmChatResult:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _text_chat_result(
+                json.dumps(
+                    {
+                        "matches": [{"artform": "Music", "organisation": "Example Org", "amount_pounds": 5000}],
+                        "confidence": "high",
+                    }
+                )
+            )
+        return _text_chat_result(
+            json.dumps({"matches": [{"artform": "Music", "organisation": "Example Org", "amount_pounds": 5000}]})
+        )
+
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+
+    schema = {
+        "type": "object",
+        "required": ["matches"],
+        "properties": {
+            "matches": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["artform", "organisation", "amount_pounds"],
+                    "properties": {
+                        "artform": {"type": "string"},
+                        "organisation": {"type": "string"},
+                        "amount_pounds": {"type": "integer"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "additionalProperties": False,
+    }
+    state = agent.RunState()
+    store = agent.EvidenceStore()
+
+    structured = await agent._build_structured_output(
+        Query(text="q", output_schema=schema), store, "the answer text", state
+    )
+
+    assert structured == {
+        "matches": [{"artform": "Music", "organisation": "Example Org", "amount_pounds": 5000}]
+    }
+
+
 async def test_structured_output_allows_legitimate_all_false_booleans(
     agent: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
