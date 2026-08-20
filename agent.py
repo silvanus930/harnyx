@@ -149,8 +149,17 @@ MIN_USABLE_ANSWER_CHARS = 20
 # the time first means nearly every real call pays for a timeout/retry
 # before reaching the one that actually answers. openrouter/deepseek-v3.2 is
 # now first since it's the one that has actually been reachable.
+# 2026-08-20: added ai_gateway/zai-glm-5.2-fast as a third-priority pair,
+# ahead of chutes -- this mirrors the current champion's own production
+# setup exactly (their LANE_A=openrouter, LANE_B=ai_gateway, never chutes),
+# and their own code comments cite real measured cost/score numbers on this
+# specific model. chutes stays as the last-resort tier rather than being
+# dropped -- it did succeed 5/165 times in our measurements, and since it's
+# only ever reached after both of the above fail, keeping it costs nothing
+# in the common case while adding real redundancy for a rare double-failure.
 DEFAULT_MODEL_WATERFALL: tuple[tuple[str, str], ...] = (
     ("openrouter", "deepseek/deepseek-v3.2"),
+    ("ai_gateway", "zai/glm-5.2-fast"),
     ("chutes", "zai-org/GLM-5.2-TEE"),
 )
 TOOLING_INFO_TIMEOUT_SECONDS = 8.0
@@ -334,7 +343,19 @@ _LOOP_SYSTEM_PROMPT = (
     "of just the page it came from. Do this for every candidate you check "
     "in a comparison, not only the one that turns out to be the answer -- "
     "the evidence that rules a candidate OUT is as important to record as "
-    "the evidence that confirms the winner.\n\n"
+    "the evidence that confirms the winner. THIS MATTERS MOST when your "
+    "answer is something you had to find, not something the question "
+    "already named: measured on a real task where our answer exactly "
+    "matched the reference -- same name, same figures, all correct -- it "
+    "still scored zero because the citation only covered an earlier, "
+    "unrelated part of a long source (\"I do not see [the actual answer] "
+    "in these citations... the second answer is superior\"). A page with "
+    "dozens of similar-looking rows or entries gives search-relevance "
+    "alone almost nothing to distinguish the one that matters, so without "
+    "note_evidence pointing at the exact row, your citation can silently "
+    "land on the wrong one even while your stated answer is completely "
+    "correct -- and an unsupported correct answer is scored the same as a "
+    "wrong one.\n\n"
     "ANSWERING: when you have enough evidence, respond with your final "
     "answer as plain text and make no further tool calls. Follow the "
     "question's literal formatting instructions exactly (notation style, "
@@ -1211,6 +1232,41 @@ def _anchors_from(question: str) -> tuple[str, ...]:
     return tuple({match.strip().lower() for match in _ANCHOR_QUOTE_RE.findall(question)})
 
 
+# 2026-08-20: real diagnosed loss, traced via recorded validator results --
+# a task whose structured answer was byte-identical to the reference still
+# scored 0.0 on 4/5 validators because the citation slice covered entries
+# 1-45 of a large register table while the actual answer (entry 63) was
+# never named in the QUESTION -- it was discovered during research. Since
+# _anchors_from(question) has nothing to anchor on for a "discovered, not
+# named" answer, and generic keyword density is near-uniform across dozens
+# of structurally similar table rows, the citation slice landed on the
+# wrong region even though the answer text itself was exactly correct.
+# These two patterns pull distinctive, low-noise anchors from the model's
+# own FINAL ANSWER instead -- proper-noun phrases and alphanumeric code
+# tokens (by-law numbers, case numbers, registration IDs) -- so a citation
+# needing a slice can be retargeted at the specific value actually claimed.
+_ANSWER_PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b")
+_ANSWER_CODE_TOKEN_RE = re.compile(r"\b[A-Za-z0-9]+(?:[.\-]+[A-Za-z0-9]+){1,5}\b")
+_ANSWER_ANCHOR_STOPWORDS = frozenset(
+    {"the answer", "based on", "according to", "the evidence", "the question", "the source"}
+)
+
+
+def _answer_anchors(text: str) -> tuple[str, ...]:
+    anchors: set[str] = set()
+    for match in _ANCHOR_QUOTE_RE.finditer(text):
+        anchors.add(match.group(1).strip().lower())
+    for match in _ANSWER_PROPER_NOUN_RE.finditer(text):
+        phrase = match.group(0).strip().lower()
+        if phrase and phrase not in _ANSWER_ANCHOR_STOPWORDS:
+            anchors.add(phrase)
+    for match in _ANSWER_CODE_TOKEN_RE.finditer(text):
+        token = match.group(0).strip().lower()
+        if any(ch.isdigit() for ch in token):
+            anchors.add(token)
+    return tuple(anchors)
+
+
 _MARKDOWN_EMPHASIS_RE = re.compile(r"[*_`]")
 _LOOSE_PUNCT_SPACE_RE = re.compile(r"\s+([,.;:])")
 _COLLAPSE_SPACE_RE = re.compile(r"\s+")
@@ -1578,6 +1634,11 @@ def _build_citations(question: str, text: str, store: EvidenceStore) -> tuple[st
     cited_indices = _extract_cited_indices(text, store)
     if not cited_indices:
         cited_indices = _relevance_ranked_indices(question, text, store)
+    # 2026-08-20: real diagnosed loss -- see _answer_anchors above. Anchors
+    # from the final answer catch a "discovered, not named" target the
+    # question-time anchors/keywords can't, for the fallback re-slice below.
+    answer_keywords = _keywords_from(question) | _keywords_from(text)
+    answer_anchors = _anchors_from(question) + _answer_anchors(text)
     refs: list[CitationRef] = []
     remap: dict[int, int] = {}
     total_chars = 0
@@ -1598,11 +1659,19 @@ def _build_citations(question: str, text: str, store: EvidenceStore) -> tuple[st
             # boilerplate (e.g. a PDF's table of contents) instead of the
             # actual keyword-dense content the model read further in the
             # page. Prefer retained_spans (the model's own note_evidence
-            # quotes -- verified proof for a specific claim) over
-            # relevant_spans (a keyword-density guess at what's relevant);
-            # only fall back to the literal head when neither exists (e.g.
-            # search-result snippets the model never opened or quoted).
-            spans = item.retained_spans or item.relevant_spans
+            # quotes -- verified proof for a specific claim); next, re-score
+            # this item's full note using anchors from the final ANSWER
+            # (not just the question -- see _answer_anchors above, and its
+            # comment for the real diagnosed loss this fixes: a
+            # "discovered, not named" target has no question-time anchor to
+            # find it by); only fall back to the stale fetch-time
+            # relevant_spans, then the literal head, when neither locates
+            # anything relevant.
+            spans = (
+                item.retained_spans
+                or _citation_spans(item.note or "", answer_keywords, answer_anchors)
+                or item.relevant_spans
+            )
             slices = []
             budget = MAX_CITATION_SLICE_CHARS
             for start, end in spans:

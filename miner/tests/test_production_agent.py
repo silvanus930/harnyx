@@ -858,13 +858,17 @@ def _tooling_info_result(allowed: dict[str, list[str]]) -> ToolCallResponse[dict
     )
 
 
-def test_default_waterfall_tries_openrouter_before_chutes(agent: ModuleType) -> None:
+def test_default_waterfall_tries_openrouter_then_ai_gateway_then_chutes(agent: ModuleType) -> None:
     # 2026-08-20: measured across 23 real task runs on two separate days,
     # chutes/GLM-5.2-TEE succeeded on only 5 of 165 LLM calls (~3%) before
     # falling through to openrouter on a 429 capacity error. openrouter must
     # stay first so a real call doesn't pay for a doomed chutes attempt.
+    # ai_gateway/zai-glm-5.2-fast sits second, mirroring the current
+    # champion's own production lane order; chutes stays last-resort rather
+    # than dropped, since it did succeed occasionally in our measurements.
     assert agent.DEFAULT_MODEL_WATERFALL[0] == ("openrouter", "deepseek/deepseek-v3.2")
-    assert agent.DEFAULT_MODEL_WATERFALL[1] == ("chutes", "zai-org/GLM-5.2-TEE")
+    assert agent.DEFAULT_MODEL_WATERFALL[1] == ("ai_gateway", "zai/glm-5.2-fast")
+    assert agent.DEFAULT_MODEL_WATERFALL[2] == ("chutes", "zai-org/GLM-5.2-TEE")
 
 
 async def test_model_waterfall_drops_pairs_the_platform_no_longer_allows(
@@ -1184,6 +1188,62 @@ def test_build_citations_prefers_retained_spans_over_relevant_spans(agent: Modul
     assert citations is not None
     slice_ = citations[0].slices[0]
     assert slice_.start == proof_start
+
+
+def test_answer_anchors_extracts_proper_nouns_and_code_tokens(agent: ModuleType) -> None:
+    text = 'The entry is Talbot Inn, repealed by L.S.P.-3088-295. "quoted phrase" also counts.'
+
+    anchors = agent._answer_anchors(text)
+
+    assert "talbot inn" in anchors
+    assert "l.s.p.-3088-295" in anchors
+    assert "quoted phrase" in anchors
+
+
+def test_answer_anchors_skips_common_leading_phrases(agent: ModuleType) -> None:
+    text = "Based on the evidence, the answer is unclear."
+
+    anchors = agent._answer_anchors(text)
+
+    assert "based on" not in anchors
+
+
+def test_build_citations_retargets_slice_using_answer_anchors_when_question_has_none(
+    agent: ModuleType,
+) -> None:
+    # Real diagnosed loss, traced via recorded validator results: a
+    # structured answer byte-identical to the reference still scored 0.0 on
+    # 4/5 validators because the citation covered an earlier, unrelated part
+    # of a long register table -- the actual answer (one specific entry) was
+    # never named in the QUESTION, only discovered during research, so
+    # question-time anchors/keywords had nothing to lock onto and generic
+    # keyword density was near-uniform across dozens of similar entries.
+    store = agent.EvidenceStore()
+    wrong_region = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor " * 90
+    right_region = "the entry is Talbot Inn, repealed by L.S.P.-3088-295 "
+    note = wrong_region + right_region + ("z" * 3000)
+    right_start = len(wrong_region)
+    right_end = right_start + len(right_region)
+    store.add(
+        receipt_id="r",
+        result_id="register-note",
+        url="https://example.com/register.pdf",
+        title="T",
+        note=note,
+        # Simulates fetch-time densest-window selection locking onto the
+        # generic wrong region -- no question anchor existed to prevent it.
+        relevant_spans=((0, 200),),
+    )
+
+    answer = "The entry is Talbot Inn, repealed by L.S.P.-3088-295 [[0]]."
+    _text, citations = agent._build_citations(
+        "Which register entry was repealed by more than one by-law?", answer, store
+    )
+
+    assert citations is not None
+    slice_ = citations[0].slices[0]
+    assert slice_.start <= right_start
+    assert slice_.end >= right_end
 
 
 async def test_tool_search_locates_relevant_span_in_oversized_note(
