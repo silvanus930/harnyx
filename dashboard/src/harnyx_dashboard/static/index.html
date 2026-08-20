@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Harnyx Miner Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    --series-1: #2a78d6;
+    --good: #0ca30c;
+    --good-text: #006300;
+    --critical: #d03b3b;
+    --warning: #fab219;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255, 255, 255, 0.10);
+      --series-1: #3987e5;
+      --good: #0ca30c;
+      --good-text: #0ca30c;
+      --critical: #e66767;
+      --warning: #fab219;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px clamp(16px, 4vw, 48px) 64px;
+  }
+  header { margin-bottom: 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .subtitle { color: var(--text-secondary); font-size: 14px; margin: 0; }
+  .refresh-note { color: var(--text-muted); font-size: 12px; margin-top: 6px; }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .card + .card { margin-top: 16px; }
+  .card h2 { font-size: 14px; margin: 0 0 14px; color: var(--text-secondary); font-weight: 600; }
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .tile .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .tile .value { font-size: 24px; font-weight: 600; }
+  .tile .hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); }
+  th { color: var(--text-secondary); font-weight: 600; font-size: 12px; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .muted { color: var(--text-muted); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+  .badge.champion { background: color-mix(in srgb, var(--good) 15%, transparent); color: var(--good-text); }
+  .badge.changed { background: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--text-primary); }
+
+  svg.chart { width: 100%; height: 160px; overflow: visible; }
+  svg.chart .grid-line { stroke: var(--grid); stroke-width: 1; }
+  svg.chart .baseline { stroke: var(--baseline); stroke-width: 1; }
+  svg.chart .series-line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  svg.chart .series-dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
+  svg.chart .axis-label { fill: var(--text-muted); font-size: 10px; }
+  .empty-state { color: var(--text-muted); font-size: 13px; padding: 10px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Harnyx Miner Dashboard</h1>
+  <p class="subtitle">Local iteration history plus public SN67 network state.</p>
+  <p class="refresh-note" id="refresh-note">Loading...</p>
+</header>
+
+<div class="tiles" id="tiles"></div>
+
+<div class="charts">
+  <div class="card">
+    <h2>Your local-eval score over time</h2>
+    <div id="score-chart"></div>
+  </div>
+  <div class="card">
+    <h2>Your local-eval cost over time (USD)</h2>
+    <div id="cost-chart"></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Recent completed batches (public network)</h2>
+  <div id="batches-table"></div>
+</div>
+
+<div class="card">
+  <h2>Your local run history</h2>
+  <div id="runs-table"></div>
+</div>
+
+<div class="card">
+  <h2>Hotkey standing</h2>
+  <div id="hotkey-standing"></div>
+</div>
+
+<script>
+const REFRESH_MS = 30000;
+
+async function fetchJson(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  return res.json();
+}
+
+function formatScore(value) {
+  return value === null || value === undefined ? "—" : value.toFixed(3);
+}
+
+function formatCost(value) {
+  return value === null || value === undefined ? "—" : `$${value.toFixed(4)}`;
+}
+
+function formatShortId(value) {
+  if (!value) return "—";
+  const s = String(value);
+  return s.length > 8 ? s.slice(0, 8) : s;
+}
+
+function el(tag, attrs, children) {
+  const node = document.createElement(tag);
+  for (const [key, val] of Object.entries(attrs || {})) {
+    if (key === "text") node.textContent = val;
+    else node.setAttribute(key, val);
+  }
+  for (const child of children || []) node.appendChild(child);
+  return node;
+}
+
+function renderTiles(overview, evalHistory) {
+  const tiles = document.getElementById("tiles");
+  tiles.innerHTML = "";
+  const champion = overview.champion;
+  const runCount = (evalHistory.local_eval_runs || []).length + (evalHistory.local_benchmark_runs || []).length;
+  const latest = overview.latest_local_eval;
+
+  const items = [
+    {
+      label: "Current champion UID",
+      value: champion && champion.champion_uid !== null && champion.champion_uid !== undefined
+        ? String(champion.champion_uid) : "—",
+      hint: champion ? `batch ${formatShortId(champion.batch_id)}` : "no completed batch found",
+    },
+    { label: "Local runs recorded", value: String(runCount), hint: "local-eval + local-benchmark reports" },
+    { label: "Latest local score", value: latest ? formatScore(latest.target_avg_score) : "—", hint: latest ? latest.mode || "" : "run harnyx-miner-local-eval" },
+    { label: "Latest local cost", value: latest ? formatCost(latest.target_total_cost_usd) : "—", hint: "USD, this artifact" },
+  ];
+
+  for (const item of items) {
+    tiles.appendChild(el("div", { class: "tile" }, [
+      el("div", { class: "label", text: item.label }),
+      el("div", { class: "value", text: item.value }),
+      el("div", { class: "hint", text: item.hint }),
+    ]));
+  }
+}
+
+function niceMax(value) {
+  if (!(value > 0)) return 1;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+  const steps = [1, 2, 2.5, 5, 10];
+  for (const step of steps) {
+    const candidate = step * magnitude;
+    if (candidate >= value) return candidate;
+  }
+  return value;
+}
+
+function renderLineChart(containerId, points, formatValue) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = "";
+  if (!points.length) {
+    container.appendChild(el("div", { class: "empty-state", text: "No local-eval runs recorded yet." }));
+    return;
+  }
+
+  const width = 560;
+  const height = 160;
+  const padLeft = 44;
+  const padRight = 12;
+  const padTop = 10;
+  const padBottom = 22;
+  const plotWidth = width - padLeft - padRight;
+  const plotHeight = height - padTop - padBottom;
+
+  const values = points.map((p) => p.value).filter((v) => v !== null && v !== undefined);
+  const maxValue = niceMax(Math.max(...values, 0));
+  const xStep = points.length > 1 ? plotWidth / (points.length - 1) : 0;
+
+  const svgns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgns, "svg");
+  svg.setAttribute("class", "chart");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+
+  [0, 0.5, 1].forEach((frac) => {
+    const y = padTop + plotHeight * (1 - frac);
+    const line = document.createElementNS(svgns, "line");
+    line.setAttribute("class", frac === 0 ? "baseline" : "grid-line");
+    line.setAttribute("x1", padLeft);
+    line.setAttribute("x2", width - padRight);
+    line.setAttribute("y1", y);
+    line.setAttribute("y2", y);
+    svg.appendChild(line);
+
+    const label = document.createElementNS(svgns, "text");
+    label.setAttribute("class", "axis-label");
+    label.setAttribute("x", padLeft - 6);
+    label.setAttribute("y", y + 3);
+    label.setAttribute("text-anchor", "end");
+    label.textContent = formatValue(maxValue * frac);
+    svg.appendChild(label);
+  });
+
+  const coords = points.map((p, i) => {
+    const x = padLeft + i * xStep;
+    const v = p.value === null || p.value === undefined ? 0 : p.value;
+    const y = padTop + plotHeight * (1 - Math.min(v / maxValue, 1));
+    return { x, y, point: p };
+  });
+
+  if (coords.length > 1) {
+    const path = document.createElementNS(svgns, "path");
+    path.setAttribute("class", "series-line");
+    path.setAttribute("d", coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x},${c.y}`).join(" "));
+    svg.appendChild(path);
+  }
+
+  for (const c of coords) {
+    const dot = document.createElementNS(svgns, "circle");
+    dot.setAttribute("class", "series-dot");
+    dot.setAttribute("cx", c.x);
+    dot.setAttribute("cy", c.y);
+    dot.setAttribute("r", 4);
+    const title = document.createElementNS(svgns, "title");
+    title.textContent = `${c.point.label}: ${formatValue(c.point.value)}`;
+    dot.appendChild(title);
+    svg.appendChild(dot);
+  }
+
+  container.appendChild(svg);
+}
+
+function renderBatchesTable(batches) {
+  const container = document.getElementById("batches-table");
+  container.innerHTML = "";
+  if (!batches.length) {
+    container.appendChild(el("div", { class: "empty-state", text: "No completed batches visible yet." }));
+    return;
+  }
+  const table = el("table", {}, []);
+  const thead = el("thead", {}, [el("tr", {}, [
+    el("th", { text: "Batch" }),
+    el("th", { text: "Status" }),
+    el("th", { text: "Champion UID" }),
+  ])]);
+  const tbody = el("tbody", {}, []);
+  let previousChampion = null;
+  for (const batch of batches) {
+    const changed = previousChampion !== null && previousChampion !== batch.champion_uid;
+    previousChampion = batch.champion_uid;
+    const championCell = el("td", {}, [
+      document.createTextNode(batch.champion_uid !== null && batch.champion_uid !== undefined ? String(batch.champion_uid) : "—"),
+    ]);
+    if (changed) {
+      championCell.appendChild(document.createTextNode(" "));
+      championCell.appendChild(el("span", { class: "badge changed", text: "changed" }));
+    }
+    tbody.appendChild(el("tr", {}, [
+      el("td", { text: formatShortId(batch.batch_id) }),
+      el("td", { text: batch.status || "—" }),
+      championCell,
+    ]));
+  }
+  table.appendChild(thead);
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+function renderRunsTable(evalHistory) {
+  const container = document.getElementById("runs-table");
+  container.innerHTML = "";
+  const runs = evalHistory.local_eval_runs || [];
+  if (!runs.length) {
+    container.appendChild(el("div", { class: "empty-state", text: "Run harnyx-miner-local-eval to populate this table." }));
+    return;
+  }
+  const table = el("table", {}, []);
+  const thead = el("thead", {}, [el("tr", {}, [
+    el("th", { text: "When" }),
+    el("th", { text: "Mode" }),
+    el("th", { text: "Batch" }),
+    el("th", { text: "Score" }),
+    el("th", { text: "Champion score" }),
+    el("th", { text: "Cost" }),
+    el("th", { text: "W / L / T" }),
+  ])]);
+  const tbody = el("tbody", {}, []);
+  for (const run of [...runs].reverse()) {
+    const when = run.generated_at ? new Date(run.generated_at * 1000).toLocaleString() : "—";
+    const wlt = (run.wins === null || run.wins === undefined) ? "—" : `${run.wins} / ${run.losses} / ${run.ties}`;
+    tbody.appendChild(el("tr", {}, [
+      el("td", { text: when }),
+      el("td", { text: run.mode || "—" }),
+      el("td", { text: formatShortId(run.batch_id) }),
+      el("td", { class: "num", text: formatScore(run.target_avg_score) }),
+      el("td", { class: "num", text: formatScore(run.champion_avg_score) }),
+      el("td", { class: "num", text: formatCost(run.target_total_cost_usd) }),
+      el("td", { class: "num", text: wlt }),
+    ]));
+  }
+  table.appendChild(thead);
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+function renderHotkeyStanding(overview) {
+  const container = document.getElementById("hotkey-standing");
+  container.innerHTML = "";
+  const standing = overview.hotkey_standing || {};
+  const lines = [];
+  if (standing.configured_uid) lines.push(`Configured UID: ${standing.configured_uid}`);
+  if (standing.configured_hotkey) lines.push(`Configured hotkey: ${standing.configured_hotkey}`);
+  if (!standing.configured_uid && !standing.configured_hotkey) {
+    lines.push("No --uid / --hotkey configured on this dashboard instance.");
+  }
+  lines.push(standing.note || "");
+  for (const line of lines) {
+    container.appendChild(el("div", { class: "empty-state", text: line }));
+  }
+}
+
+async function refresh() {
+  const note = document.getElementById("refresh-note");
+  try {
+    const [overview, evalHistory, batchesPayload] = await Promise.all([
+      fetchJson("/api/overview"),
+      fetchJson("/api/local-eval-history"),
+      fetchJson("/api/batches"),
+    ]);
+
+    renderTiles(overview, evalHistory);
+
+    const scorePoints = (evalHistory.local_eval_runs || []).map((run, i) => ({
+      value: run.target_avg_score,
+      label: `run ${i + 1}`,
+    }));
+    const costPoints = (evalHistory.local_eval_runs || []).map((run, i) => ({
+      value: run.target_total_cost_usd,
+      label: `run ${i + 1}`,
+    }));
+    renderLineChart("score-chart", scorePoints, formatScore);
+    renderLineChart("cost-chart", costPoints, formatCost);
+
+    renderBatchesTable(batchesPayload.batches || []);
+    renderRunsTable(evalHistory);
+    renderHotkeyStanding(overview);
+
+    note.textContent = `Last updated ${new Date().toLocaleTimeString()} · refreshes every ${REFRESH_MS / 1000}s`;
+  } catch (err) {
+    note.textContent = `Refresh failed: ${err.message}`;
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

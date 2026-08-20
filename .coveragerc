@@ -5,6 +5,7 @@ source =
     harnyx_validator
     harnyx_miner
     harnyx_miner_sdk
+    harnyx_dashboard
 omit =
     */tests/*
 

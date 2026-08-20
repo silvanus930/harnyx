@@ -83,11 +83,18 @@ def platform_base_url_from_env() -> str:
 
 
 class PlatformMonitoringClient:
-    def __init__(self, *, base_url: str, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        timeout_seconds: float = 30.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
             follow_redirects=True,
+            transport=transport,
         )
 
     @classmethod
@@ -97,10 +104,13 @@ class PlatformMonitoringClient:
     def close(self) -> None:
         self._client.close()
 
-    def find_latest_completed_batch(self) -> dict[str, object]:
+    def list_recent_completed_batches(self, *, limit: int = 20) -> list[dict[str, object]]:
+        if limit <= 0:
+            return []
+        collected: list[dict[str, object]] = []
         before: str | None = None
         before_batch_id: str | None = None
-        while True:
+        while len(collected) < limit:
             params: dict[str, _QueryParamValue] = {"limit": 100}
             if before is not None:
                 params["before"] = before
@@ -111,16 +121,24 @@ class PlatformMonitoringClient:
             for raw_batch in batches:
                 batch = _require_mapping(raw_batch, label="monitoring batch")
                 if str(batch.get("status")) == "completed":
-                    return dict(batch)
+                    collected.append(dict(batch))
+                    if len(collected) >= limit:
+                        break
             next_before = payload.get("next_before")
-            if next_before in (None, ""):
+            if next_before in (None, "") or len(collected) >= limit:
                 break
             before = str(next_before)
             next_before_batch_id = payload.get("next_before_batch_id")
             before_batch_id = (
                 None if next_before_batch_id in (None, "") else str(next_before_batch_id)
             )
-        raise RuntimeError("no completed public miner-task batch is available")
+        return collected
+
+    def find_latest_completed_batch(self) -> dict[str, object]:
+        batches = self.list_recent_completed_batches(limit=1)
+        if not batches:
+            raise RuntimeError("no completed public miner-task batch is available")
+        return batches[0]
 
     def get_batch_detail(self, batch_id: UUID) -> dict[str, object]:
         return self._get_json_object(f"/v1/monitoring/miner-task-batches/{batch_id}")

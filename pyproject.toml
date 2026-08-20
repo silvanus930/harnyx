@@ -23,6 +23,7 @@ members = [
   "miner",
   "sandbox",
   "packages/miner-sdk",
+  "dashboard",
 ]
 
 [tool.uv.sources]
@@ -31,3 +32,4 @@ harnyx-validator = { workspace = true }
 harnyx-miner = { workspace = true }
 harnyx-miner-sdk = { workspace = true }
 harnyx-sandbox = { workspace = true }
+harnyx-dashboard = { workspace = true }

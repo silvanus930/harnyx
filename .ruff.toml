@@ -45,6 +45,7 @@ known-first-party = [
   "harnyx_validator",
   "harnyx_miner",
   "harnyx_miner_sdk",
+  "harnyx_dashboard",
 ]
 
 [lint.mccabe]

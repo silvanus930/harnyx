@@ -290,6 +290,12 @@ class MinerTask(BaseModel):
     query: Query
     reference_answer: ReferenceAnswer
     budget_usd: float = Field(default=DEFAULT_MINER_TASK_BUDGET_USD, ge=0.0)
+    # Local stopgap (2026-08-17): the live platform now sends this field
+    # (observed values "qualifying" / "main") but no commit on this checkout
+    # or origin/main yet declares it on MinerTask. Added from observed API
+    # data, not an upstream-confirmed contract change -- drop this once the
+    # real fix lands upstream.
+    evaluation_stage: str | None = None
 
 
 __all__ = [

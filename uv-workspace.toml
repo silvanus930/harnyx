@@ -5,4 +5,5 @@ members = [
   "miner",
   "sandbox",
   "packages/miner-sdk",
+  "dashboard",
 ]

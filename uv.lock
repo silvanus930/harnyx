@@ -5,6 +5,7 @@ requires-python = "==3.11.*"
 [manifest]
 members = [
     "harnyx-commons",
+    "harnyx-dashboard",
     "harnyx-miner",
     "harnyx-miner-sdk",
     "harnyx-sandbox",
@@ -826,6 +827,34 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4" },
     { name = "regex", specifier = ">=2026.2.28,<2027" },
     { name = "sentry-sdk", specifier = ">=2.64.0" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "harnyx-dashboard"
+version = "0.1.0"
+source = { editable = "dashboard" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "harnyx-miner" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.133,<1" },
+    { name = "harnyx-miner", editable = "miner" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pydantic", specifier = ">=2.8" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 provides-extras = ["dev"]
 
