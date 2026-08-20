@@ -1485,6 +1485,33 @@ def _densest_windows(
     return text, spans
 
 
+# 2026-08-20: real diagnosed pattern, twice -- the judge repeatedly
+# preferred a comparison answer's citations over ours specifically for
+# being cleaner ("Answer 2's citations are fragmented -- multiple slices
+# of the same page for the same table -- and less organized") even when
+# both answers' actual content was identical. Picking up to
+# DENSEST_CHUNKS_PICKED separate small chunks can select several that sit
+# right next to each other in the source; merge those into one clean
+# slice. Chunks that are genuinely far apart (proving different
+# sub-claims) stay separate -- collapsing those would pull in irrelevant
+# text between them instead of cleaning anything up.
+_CITATION_MERGE_GAP_CHARS = 400
+
+
+def _merge_nearby_spans(spans: tuple[tuple[int, int], ...]) -> tuple[tuple[int, int], ...]:
+    if not spans:
+        return spans
+    ordered = sorted(spans)
+    merged: list[list[int]] = [list(ordered[0])]
+    for start, end in ordered[1:]:
+        last = merged[-1]
+        if start - last[1] <= _CITATION_MERGE_GAP_CHARS:
+            last[1] = max(last[1], end)
+        else:
+            merged.append([start, end])
+    return tuple((s, e) for s, e in merged)
+
+
 def _citation_spans(
     content: str, keywords: set[str], anchors: tuple[str, ...] = ()
 ) -> tuple[tuple[int, int], ...]:
@@ -1501,7 +1528,8 @@ def _citation_spans(
     relevant = [i for i in ranked if scores[i] > 0][:DENSEST_CHUNKS_PICKED]
     if not relevant:
         return ()
-    return tuple(chunk_bounds[i] for i in sorted(relevant))
+    spans = tuple(chunk_bounds[i] for i in sorted(relevant))
+    return _merge_nearby_spans(spans)
 
 
 # --------------------------------------------------------------------------
