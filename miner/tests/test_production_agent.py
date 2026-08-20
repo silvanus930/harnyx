@@ -1570,6 +1570,74 @@ def test_build_citations_retargets_slice_using_answer_anchors_when_question_has_
     assert slice_.end >= right_end
 
 
+def test_proof_quotes_from_structured_json_include_member_labels(agent: ModuleType) -> None:
+    answer = json.dumps(
+        {
+            "partially_accept_number": 32,
+            "unable_to_accept_numbers": [9, 10, 21, 23],
+            "premise_accurate": False,
+        }
+    )
+
+    quotes = agent._proof_quotes_from_answer(answer)
+
+    assert "Recommendation 21" in quotes
+    assert "Recommendation 32" in quotes
+    assert "Recommendation 9" in quotes
+
+
+def test_build_citations_splits_distant_answer_proof_spans_into_separate_refs(
+    agent: ModuleType,
+) -> None:
+    # Real diagnosed pairwise loss (423239a1): JSON listed every correct
+    # recommendation id but one keyword-dense page citation missed the
+    # "UNABLE TO ACCEPT" labels; the reference won with one tight citation
+    # per member. Answer-derived proof spans must retarget AND split into
+    # separate CitationRefs when members sit far apart in the same note.
+    store = agent.EvidenceStore()
+    head = "front matter boilerplate " * 200
+    rec9 = "Recommendation 9 UNABLE TO ACCEPT for reason A. "
+    mid = "unrelated body text " * 300
+    rec21 = "Recommendation 21 UNABLE TO ACCEPT for reason B. "
+    mid2 = "more unrelated text " * 300
+    rec32 = "Recommendation 32 PARTIALLY ACCEPT for reason C. "
+    note = head + rec9 + mid + rec21 + mid2 + rec32 + ("z" * 2000)
+    store.add(
+        receipt_id="r",
+        result_id="inquiry-note",
+        url="https://example.com/response.html",
+        title="T",
+        note=note,
+        relevant_spans=((0, 200),),
+    )
+
+    answer = json.dumps(
+        {
+            "partially_accept_number": 32,
+            "premise_accurate": False,
+            "unable_to_accept_numbers": [9, 21],
+        }
+    )
+    _text, citations = agent._build_citations(
+        "Which recommendations were unable to accept?", answer, store
+    )
+
+    assert citations is not None
+    assert len(citations) >= 2
+    covered = " ".join(
+        note[s.start : s.end] for c in citations for s in (c.slices or [])
+    )
+    assert "Recommendation 9" in covered
+    assert "Recommendation 21" in covered
+    assert "Recommendation 32" in covered
+
+
+def test_answer_anchors_includes_all_caps_register_labels(agent: ModuleType) -> None:
+    anchors = agent._answer_anchors('{"name":"WOLVERINE"} and STORGLACIÄREN')
+    assert "wolverine" in anchors
+    assert "storglaciären" in anchors or "storglaciÄren".lower() in anchors
+
+
 async def test_tool_search_locates_relevant_span_in_oversized_note(
     agent: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
