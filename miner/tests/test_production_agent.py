@@ -1348,6 +1348,42 @@ def test_system_prompt_commits_instead_of_hedging(agent: ModuleType) -> None:
     assert "page_grep" in prompt
 
 
+def test_system_prompt_covers_case_diacritic_fidelity(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "CAPITALIZATION and DIACRITICS" in prompt
+    assert "WOLVERINE" in prompt
+
+
+def test_system_prompt_covers_verified_pairing(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "MATCHING/PAIRING" in prompt
+    assert "A category's own total and one member's individual figure are NOT the same thing" in prompt
+
+
+async def test_audit_prompt_covers_case_and_pairing_checks(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen_prompts: list[str] = []
+
+    async def fake_llm_chat(**kwargs: object) -> LlmChatResult:
+        messages = kwargs["messages"]  # type: ignore[index]
+        seen_prompts.append(str(messages[0]["content"]))  # type: ignore[index]
+        return _text_chat_result("An answer with [[0]] citation that is long enough to pass the length check.")
+
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note="some evidence")
+    state = agent.RunState()
+
+    await agent._audit_answer("q", "A draft answer with [[0]] citation, long enough to be usable.", store, state)
+
+    assert seen_prompts
+    audit_prompt = seen_prompts[0]
+    assert "on nine things" in audit_prompt
+    assert "CASE/DIACRITIC FIDELITY" in audit_prompt
+    assert "VERIFIED PAIRING" in audit_prompt
+
+
 def test_build_citations_prefers_retained_spans_over_relevant_spans(agent: ModuleType) -> None:
     # The note_evidence tool's model-verified quote location should win
     # over the generic keyword-density guess when both exist for the same
