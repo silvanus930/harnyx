@@ -302,10 +302,29 @@ _LOOP_SYSTEM_PROMPT = (
     "four quarterly reports, three editions), open every one of them "
     "individually before answering -- do not stop after gathering only "
     "some of what was named and treat that as enough. "
+    "ENUMERATION COMPLETENESS: when the answer is a count or list of every "
+    "item that satisfies a condition in a source (table rows, numbered "
+    "entries, register records), keep scanning until the source is "
+    "exhausted -- finding four qualifying items when six exist is a wrong "
+    "answer even if every item you did find is correct and well-cited. "
+    "After your first pass, re-check the source for any remaining members "
+    "in the same series (nearby row numbers, adjacent IDs, later pages) "
+    "before committing; a complete enumeration beats a partial one every "
+    "time. "
     "When a question requires checking multiple candidates or conditions "
     "(e.g. \"which of these N items is the one that...\"), check every "
     "candidate against the evidence before answering -- do not stop at the "
-    "first one that seems plausible. When a claim concerns what is "
+    "first one that seems plausible. ENTITY SELECTION: when several "
+    "records partially match but the question adds a discriminating "
+    "criterion (\"more than one\", \"at least N\", \"exactly two\", \"the "
+    "only one with...\"), verify that criterion quantitatively for every "
+    "candidate -- do not pick the first record that matches the easy "
+    "fields (name, address, date) while ignoring a count or exclusivity "
+    "constraint that only one candidate actually satisfies. Measured on "
+    "a real task: an answer correctly identified a property's name and "
+    "address but selected the entry with one repealing by-law when the "
+    "question asked for the one with more than one -- wrong entity, zero "
+    "score, despite every cited field looking right. When a claim concerns what is "
     "current, latest, or still standing, actively check for a more recent "
     "update, correction, or replacement rather than trusting the first "
     "matching result, which may be outdated. The reverse mistake is just as "
@@ -371,7 +390,16 @@ _LOOP_SYSTEM_PROMPT = (
     "a real task: an answer correctly found two genuine matches, then "
     "added a third, unverified one that turned out to compare the wrong "
     "pair of numbers -- committing to a plausible-looking but unconfirmed "
-    "match is exactly as wrong as leaving a real one out.\n\n"
+    "match is exactly as wrong as leaving a real one out. "
+    "SORT ORDER: when the question asks for a list in ascending or "
+    "descending order by a numeric (or date) field, put the collected "
+    "items into `compute` and let it sort -- do not order by eye. "
+    "Measured on a real task: all four named items and their values were "
+    "correct and casing was exact, but the list put 0.6 before 0.64 when "
+    "the question asked for descending order -- the answer scored zero "
+    "purely on ordering. Confirm the sort direction against the "
+    "question's wording (\"highest first\", \"descending\", \"from largest "
+    "to smallest\") before emitting the final list.\n\n"
     "PROVING: the instant you read the specific number, name, or fact that "
     "settles part of the answer, call `note_evidence` with the exact "
     "evidence index and the verbatim text (copy it, don't paraphrase) -- "
@@ -419,7 +447,15 @@ _LOOP_SYSTEM_PROMPT = (
     "normalize it to \"Wolverine\" or drop the umlaut just because that "
     "reads more naturally; a correctly-identified item with silently "
     "normalized casing or stripped diacritics is graded as not matching "
-    "the source. Cite the evidence item numbers "
+    "the source. The same fidelity applies to ordinary title-case or "
+    "sentence-case phrases, not only ALL-CAPS labels: if the source "
+    "prints \"End of mission\", do not quietly rewrite it as \"end of "
+    "mission\" -- measured on a real task, every other field was correct "
+    "and the answer still scored zero on that single casing change. "
+    "When the answer is a structured list that the question asked to "
+    "order by a numeric field, emit it in that exact order (use "
+    "`compute` to sort if needed) -- a correctly identified list in the "
+    "wrong order is graded wrong. Cite the evidence item numbers "
     "inline using double brackets like [[2]] or [[1]][[3]] for every "
     "non-obvious factual claim -- [[n]] is the citation pointer the judge "
     "recognizes; a single-bracket [2] is read as ordinary text and backs "
@@ -620,6 +656,15 @@ _CAP_CALC_TERMS = (
     "how many", "total", "difference", "percentage", "percent", "sum of",
     "average", "ratio", "combined", "how much more", "how much less",
 )
+_CAP_SORT_TERMS = (
+    "descending", "ascending", "highest first", "lowest first",
+    "from largest", "from smallest", "in order of", "sorted by",
+    "rank by", "order by",
+)
+_CAP_ENUM_TERMS = (
+    "list every", "list all", "enumerate", "each of the", "all of the",
+    "every entry", "every item", "which of the following", "find all",
+)
 _CAP_PREMISE_HINT = (
     "This question may embed a premise that is stale or no longer "
     "accurate -- verify every named fact against current evidence before "
@@ -634,6 +679,18 @@ _CAP_TIME_HINT = (
 _CAP_CALC_HINT = (
     "This needs a real computed answer -- use the `compute` tool on the "
     "cited operands rather than doing the arithmetic yourself or by eye."
+)
+_CAP_SORT_HINT = (
+    "This asks for a sorted list -- collect every item with its sort key, "
+    "then use `compute` to order them in the exact direction the question "
+    "names (ascending vs descending). Ordering by eye is a known failure "
+    "mode even when every value is correct."
+)
+_CAP_ENUM_HINT = (
+    "This needs an exhaustive enumeration -- after your first pass, "
+    "re-scan the same source for any remaining same-series members before "
+    "committing. A partial list of correct items still scores zero when "
+    "the reference found more."
 )
 _CAP_STRUCT_HINT = (
     "A structured answer is requested -- match every field's meaning and "
@@ -651,6 +708,10 @@ def _capability_signal_hints(question: str, *, has_output_schema: bool) -> str |
         hints.append(_CAP_TIME_HINT)
     if any(term in lowered for term in _CAP_CALC_TERMS):
         hints.append(_CAP_CALC_HINT)
+    if any(term in lowered for term in _CAP_SORT_TERMS):
+        hints.append(_CAP_SORT_HINT)
+    if any(term in lowered for term in _CAP_ENUM_TERMS):
+        hints.append(_CAP_ENUM_HINT)
     if has_output_schema:
         hints.append(_CAP_STRUCT_HINT)
     if not hints:
@@ -1589,7 +1650,7 @@ async def _audit_answer(question: str, answer: str, store: EvidenceStore, state:
             "role": "system",
             "content": (
                 "You are a strict answer auditor. Check the draft answer "
-                "against the question and the evidence on nine things: "
+                "against the question and the evidence on twelve things: "
                 "(1) FORMAT -- does it follow the question's literal "
                 "formatting/precision instructions exactly (notation, "
                 "digit precision, ordering, units), with no rounding or "
@@ -1607,8 +1668,10 @@ async def _audit_answer(question: str, answer: str, store: EvidenceStore, state:
                 "most distinctive or memorable clue; (5) ENUMERATION "
                 "COVERAGE -- if the answer states a count or list of items "
                 "all satisfying some condition, does the evidence show each "
-                "individual item was checked and cited, not just some of "
-                "them behind one shared citation; (6) SOURCE DATE -- if the "
+                "individual item was checked and cited, AND that the scan "
+                "was exhaustive (no remaining same-series members left "
+                "unchecked in the source) -- a correct-looking partial "
+                "list of 4 when 6 qualify fails this; (6) SOURCE DATE -- if the "
                 "question anchors to one specific dated snapshot or "
                 "edition, does the cited evidence's own stated date "
                 "actually match that date rather than a later live version; "
@@ -1625,18 +1688,31 @@ async def _audit_answer(question: str, answer: str, store: EvidenceStore, state:
                 "the question asks for a name or label as it appears on a "
                 "specific source, does the draft preserve that source's "
                 "exact capitalization and diacritics rather than a "
-                "normalized version (the source's \"WOLVERINE\" silently "
-                "rewritten as \"Wolverine\" fails this even when the "
-                "underlying identification is correct); (9) VERIFIED "
+                "normalized version -- this covers ALL-CAPS labels "
+                "(source \"WOLVERINE\" rewritten as \"Wolverine\"), "
+                "diacritics, AND ordinary title/sentence case (source "
+                "\"End of mission\" rewritten as \"end of mission\"); (9) VERIFIED "
                 "PAIRING -- if the answer claims two values from different "
                 "parts of the evidence are equal or matched (an amount "
                 "matching an award, a total matching a member's figure), "
                 "does the evidence show those exact two figures are "
                 "actually identical, not merely from the same category or "
                 "similar in size -- a category's own total is not the same "
-                "thing as one member's individual figure. "
+                "thing as one member's individual figure; (10) SORT ORDER "
+                "-- if the question asks for ascending or descending order "
+                "by a numeric/date field, does the draft list actually "
+                "follow that order (e.g. 0.64 before 0.6 when descending), "
+                "not the reverse; (11) ENTITY SELECTION -- if several "
+                "records partially match but the question adds a "
+                "discriminating criterion (\"more than one\", \"at least N\", "
+                "\"the only one with...\"), does the chosen record actually "
+                "satisfy that criterion, not just the easy name/address/"
+                "date fields; (12) EXCLUSION -- if the question says to "
+                "exclude a named category, region, or flagged item from a "
+                "tally or list, confirm that item is actually left out of "
+                "the final count. "
                 "If "
-                "the draft fully passes all nine, repeat it unchanged, "
+                "the draft fully passes all twelve, repeat it unchanged, "
                 "including every [[n]] citation marker exactly as written. "
                 "If it fails one, output a corrected version that fixes "
                 "only that issue and keeps every [[n]] marker in place -- "
