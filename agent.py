@@ -1848,6 +1848,22 @@ def _is_usable_answer(text: str | None) -> bool:
         return False
     if _TOOL_MARKUP_RE.search(stripped):
         return False
+    # 2026-08-21: real diagnosed production loss (task 7043c754, batch
+    # 7df1fd02) -- the loop ran out of turns and fell to _force_final_answer,
+    # which explicitly tells the model to commit rather than refuse but has
+    # no enforcement of its own. The model wrote "Unable to determine from
+    # the extracted evidence" anyway, and _finalize_answer's only check on
+    # that return value was _is_usable_answer -- which checked length and
+    # garbage patterns but not refusal language -- so it shipped as final
+    # even though the judge confirmed the actual data was in our own
+    # gathered citations. _INCOMPLETE_COVERAGE_RE already exists and is
+    # proven (it drives the loop's own mid-research retry); checking it
+    # here too means EVERY caller of _is_usable_answer -- not just the
+    # loop's per-turn branch -- rejects a self-admitted refusal and lets
+    # the digest/deterministic/knowledge-only rescue stages get a real
+    # attempt instead of accepting the refusal as the final answer.
+    if _INCOMPLETE_COVERAGE_RE.search(stripped):
+        return False
     return not _looks_like_stuck_repetition(stripped)
 
 

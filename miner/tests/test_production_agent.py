@@ -310,6 +310,41 @@ async def test_deterministic_rescue_rung_used_when_loop_answer_unusable(
     assert result.citations is not None
 
 
+async def test_finalize_answer_rejects_refusal_shaped_loop_answer(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Real diagnosed production loss (task 7043c754, batch 7df1fd02): the
+    # loop ran out of turns and fell to _force_final_answer, which tells
+    # the model to commit rather than refuse but enforces nothing -- the
+    # model wrote "Unable to determine from the extracted evidence" anyway,
+    # and it shipped as the final answer because _finalize_answer's only
+    # gate, _is_usable_answer, checked length/garbage but not refusal
+    # language. The judge confirmed the real data was in our own gathered
+    # citations the whole time. _is_usable_answer now also rejects
+    # self-admitted-incomplete phrasing, so this refusal must fall through
+    # to the deterministic rescue rung instead of shipping as-is.
+    async def fake_llm_chat(**__: object) -> LlmChatResult:
+        # The digest rescue rung's own synthesis attempt also comes back
+        # unusably short, so this test exercises the deterministic rung
+        # after it -- the actual rung under test.
+        return _text_chat_result("no")
+
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="Alpha", note="Alpha evidence")
+    state = agent.RunState()
+
+    refusal = (
+        "Based on the evidence gathered, the specific numerical values "
+        "were not extracted. Unable to determine from the extracted "
+        "evidence."
+    )
+    result = await agent._finalize_answer("What does the evidence say?", refusal, store, state)
+
+    assert "Unable to determine" not in result
+    assert "Alpha evidence" in result
+
+
 async def test_loop_retries_after_leaked_tool_call_markup_and_recovers_real_answer(
     agent: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
