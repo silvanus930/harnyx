@@ -1537,6 +1537,18 @@ def test_system_prompt_covers_record_identity(agent: ModuleType) -> None:
     assert "a neighboring row for a different entity" in prompt
 
 
+def test_system_prompt_covers_column_identity_in_wide_tables(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "count columns from" in prompt
+    assert "Commercial 2024" in prompt
+
+
+def test_system_prompt_covers_threshold_inequality_verification(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "THRESHOLD / INEQUALITY CLAIMS" in prompt
+    assert "eyeballing fails" in prompt
+
+
 def test_system_prompt_covers_citation_precision(agent: ModuleType) -> None:
     prompt = agent._LOOP_SYSTEM_PROMPT
     assert "CITATION PRECISION" in prompt
