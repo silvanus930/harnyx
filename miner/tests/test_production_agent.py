@@ -1425,6 +1425,43 @@ async def test_audit_prompt_covers_case_and_pairing_checks(
     assert "VERIFIED PAIRING" in audit_prompt
 
 
+def test_normalize_citation_markers_upgrades_bare_marker_to_double_bracket(
+    agent: ModuleType,
+) -> None:
+    # Real diagnosed loss: the model wrote "[24]" instead of "[[24]]" for a
+    # real evidence index. The scoring rubric treats bare [n] as ordinary
+    # text, not a citation pointer, so the claim loses all backing even
+    # though the index was real and correct.
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note="n")
+    for _ in range(24):
+        store.add(receipt_id="r", result_id="r-x", url="https://example.com/x", title="T", note="n")
+
+    normalized = agent._normalize_citation_markers("The value is X [24].", store)
+
+    assert normalized == "The value is X [[24]]."
+
+
+def test_normalize_citation_markers_leaves_unknown_index_untouched(agent: ModuleType) -> None:
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note="n")
+
+    normalized = agent._normalize_citation_markers("See footnote [99] in the source.", store)
+
+    assert normalized == "See footnote [99] in the source."
+
+
+def test_normalize_citation_markers_does_not_double_wrap_existing_markers(
+    agent: ModuleType,
+) -> None:
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note="n")
+
+    normalized = agent._normalize_citation_markers("Already correct [[0]].", store)
+
+    assert normalized == "Already correct [[0]]."
+
+
 def test_build_citations_prefers_retained_spans_over_relevant_spans(agent: ModuleType) -> None:
     # The note_evidence tool's model-verified quote location should win
     # over the generic keyword-density guess when both exist for the same

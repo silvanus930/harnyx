@@ -951,6 +951,7 @@ async def _run_query(query: Query) -> Response:
     text_answer = await _finalize_answer(query.text, loop_answer, store, state)
     text_answer = await _audit_answer(query.text, text_answer, store, state)
     text_answer = _clamp_text(text_answer)
+    text_answer = _normalize_citation_markers(text_answer, store)
     text_answer, citations = _build_citations(query.text, text_answer, store)
 
     if query.output_schema is None:
@@ -1887,6 +1888,29 @@ def _clamp_text(text: str) -> str:
 # --------------------------------------------------------------------------
 # Citations
 # --------------------------------------------------------------------------
+
+
+_BARE_CITATION_RE = re.compile(r"(?<!\[)\[(\d+)\](?!\])")
+
+
+def _normalize_citation_markers(text: str, store: EvidenceStore) -> str:
+    # 2026-08-20: two real production losses (both content rated equally
+    # correct by the judge) came down entirely to this -- the model wrote a
+    # bare, single-bracket marker like [24] or [42] instead of [[24]]. The
+    # scoring rubric treats [n] as "ordinary content, not a citation
+    # pointer" (see _CITATION_INDEX_RE above), so the claim silently loses
+    # all citation backing even though the evidence index was real and
+    # correct. Upgrade any bare [n] that names a real EvidenceStore index to
+    # [[n]] before citation extraction ever sees it; leave anything else
+    # (a page number quoted from the source, a footnote that isn't ours)
+    # untouched since it won't match a real index.
+    valid_indices = {item.index for item in store.items}
+
+    def _replace(match: re.Match[str]) -> str:
+        idx = int(match.group(1))
+        return f"[[{idx}]]" if idx in valid_indices else match.group(0)
+
+    return _BARE_CITATION_RE.sub(_replace, text)
 
 
 def _extract_cited_indices(text: str, store: EvidenceStore) -> list[int]:
