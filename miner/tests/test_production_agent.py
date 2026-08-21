@@ -1420,7 +1420,7 @@ async def test_audit_prompt_covers_case_and_pairing_checks(
 
     assert seen_prompts
     audit_prompt = seen_prompts[0]
-    assert "on nine things" in audit_prompt
+    assert "on thirteen things" in audit_prompt
     assert "CASE/DIACRITIC FIDELITY" in audit_prompt
     assert "VERIFIED PAIRING" in audit_prompt
 
