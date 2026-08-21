@@ -1493,6 +1493,25 @@ def test_system_prompt_covers_title_matching_normalization_and_exclusion(agent: 
     assert "different sequels, different editions, different years" in prompt
 
 
+def test_system_prompt_covers_record_identity(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "RECORD IDENTITY" in prompt
+    assert "a neighboring row for a different entity" in prompt
+
+
+def test_system_prompt_covers_citation_precision(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "CITATION PRECISION" in prompt
+    assert "format-description" in prompt
+    assert "exploratory or tangential source" in prompt
+
+
+def test_system_prompt_covers_title_case_convention(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "Capitalizing every word is not title case" in prompt
+    assert "The Banshees of Inisherin" in prompt
+
+
 def test_system_prompt_covers_explicit_list_before_tally(agent: ModuleType) -> None:
     prompt = agent._LOOP_SYSTEM_PROMPT
     assert "write out the" in prompt
