@@ -191,7 +191,15 @@ _ANCHOR_QUOTE_RE = re.compile(r'"([^"]{8,200})"')
 # Since message.tool_calls was empty, the loop treated that garbled XML as
 # the finished answer. Reject it so the rescue ladder gets a chance to
 # produce something real instead of shipping raw tool-call markup.
-_TOOL_MARKUP_RE = re.compile(r"<(?:function_calls|invoke|parameter)\b", re.IGNORECASE)
+# 2026-08-21: real diagnosed production loss -- a different provider leaked
+# its native tool-call control token instead of XML, ending the "final"
+# answer mid-sentence with a bare fragment: "...I will now search for the
+# current STD index (August 2026). <｜DSML｜funct". The reserved-token
+# marker "<｜" (fullwidth vertical bar, U+FF5C) never appears in real prose
+# from any provider seen so far, so it's a safe, provider-agnostic signal
+# that a tool-call token leaked into content instead of being parsed as a
+# real tool call.
+_TOOL_MARKUP_RE = re.compile(r"<(?:function_calls|invoke|parameter)\b|<｜", re.IGNORECASE)
 # 2026-08-18: real diagnosed loss, seen twice in real transcripts on
 # questions naming several specific documents/periods -- the model opens
 # only some of them, then self-admits the gap in its own final answer
@@ -221,6 +229,16 @@ _INCOMPLETE_COVERAGE_RE = re.compile(
     r"|\bunable to (?:complete|determine|find|identify|confirm|name)\b"
     r"|\ba? ?partial answer\b"
     r"|\bcan(?:not|'t)? ?(?:only )?partially answer\b"
+    # 2026-08-21: real diagnosed production loss (task e900abf6) -- the
+    # model's actual give-up wording was "I have not yet fetched..." /
+    # "I need to obtain X before I can determine..." / "I will now search
+    # for...", none of which the patterns above matched (different verb
+    # tense, and a positive "before I can" instead of "cannot"). This
+    # shipped as the final answer -- with a leaked tool-call token trailing
+    # it, see _TOOL_MARKUP_RE above -- instead of triggering a retry.
+    r"|\bhave not yet \w+\b"
+    r"|\bneed(?:s)? to \w+ before (?:I|it) can\b"
+    r"|\bI will now (?:search|fetch|open|check|look)\b"
     # 2026-08-18: real diagnosed WebWalkerQA (Multi-Source) loss -- this suite
     # draws bilingual questions, and a Chinese-language answer self-admitted
     # the same "found half, gave up on the rest" gap ("但具体的历史意义内容在
@@ -377,7 +395,14 @@ _LOOP_SYSTEM_PROMPT = (
     "still miscounted the final tally by hand (13 vs. the correct 12) and "
     "named the wrong region as a result -- the raw facts were all right "
     "and the answer still scored zero, because the arithmetic on top of "
-    "them was wrong. The same discipline applies to MATCHING/PAIRING "
+    "them was wrong. This kept recurring even with `compute` available: "
+    "a later task counted 6 tied rows against a correct 5. Do not hand "
+    "`compute` a pre-aggregated total to double check -- write out the "
+    "explicit list of every row's own identifier (row number, date, "
+    "label) that you're counting as qualifying, THEN pass that list's "
+    "length to `compute`; a miscount is then a wrong ITEM in a visible "
+    "list you can re-check line by line, not an invisible slip inside a "
+    "running total. The same discipline applies to MATCHING/PAIRING "
     "questions (\"find the item in list A whose value exactly equals an "
     "item in list B\"): a pairing is only real if the two specific values "
     "are actually identical -- confirm this with `compute` (or a direct "
@@ -390,7 +415,31 @@ _LOOP_SYSTEM_PROMPT = (
     "a real task: an answer correctly found two genuine matches, then "
     "added a third, unverified one that turned out to compare the wrong "
     "pair of numbers -- committing to a plausible-looking but unconfirmed "
-    "match is exactly as wrong as leaving a real one out. "
+    "match is exactly as wrong as leaving a real one out. The identical "
+    "discipline applies when matching NAMES or TITLES across two lists "
+    "rather than numbers (\"count the distinct items appearing in both "
+    "lists, using these normalization rules...\"): apply the question's "
+    "stated equivalence rules (ignore case, punctuation, a moved leading "
+    "article, a known abbreviation) exactly, but also respect its stated "
+    "EXCLUSIONS (different sequels, different editions, different years "
+    "are not the same item) -- write both lists as Python strings/lists in "
+    "`compute`, normalize them with the exact rules given, and let it "
+    "compute the match set, rather than eyeballing similarity across two "
+    "long lists, which silently over-counts near-misses as matches. "
+    "CONDITIONAL VALUES: when a source states two or more values gated by "
+    "an explicit condition (\"16 or 20 depending on whether 8 or 10 lanes "
+    "are used\", \"as given in the 2024 report's own comparison, not the "
+    "2023 report directly\"), identify which specific condition the "
+    "question actually specifies BEFORE picking a value -- do not default "
+    "to the first-listed option or the more prominent one. Measured on "
+    "real tasks: one answer reported the 2023 figure straight from the "
+    "2023 source (17) instead of the figure the 2024 report's own "
+    "retrospective comparison gave for 2023 (10), which is what the "
+    "question actually asked for; another picked \"10\" from a "
+    "\"sixteen (16) or (20)\" rule without checking which lane-count "
+    "condition the question specified, when the correct branch was 20. "
+    "Re-read the exact condition named in the question and match it to "
+    "the source's own stated condition before committing to a branch. "
     "SORT ORDER: when the question asks for a list in ascending or "
     "descending order by a numeric (or date) field, put the collected "
     "items into `compute` and let it sort -- do not order by eye. "
@@ -467,6 +516,20 @@ _LOOP_SYSTEM_PROMPT = (
     "prints \"End of mission\", do not quietly rewrite it as \"end of "
     "mission\" -- measured on a real task, every other field was correct "
     "and the answer still scored zero on that single casing change. "
+    "AS-GIVEN-IN-THE-CITATION WORDING: when the question asks for a name, "
+    "title, or phrase \"as given in [a specific citation/instruction/"
+    "passage]\", match that exact passage's own wording -- not a more "
+    "complete or formally correct version of the same name that you know "
+    "from elsewhere, and not your own paraphrase of the general "
+    "instruction it comes from. Measured on real tasks: one answer wrote "
+    "\"Leroy P. Steele Prize for...\" when the specific citation being "
+    "quoted printed the shorter \"Steele Prize for...\"; another "
+    "paraphrased an amendatory instruction (\"...and appendix A to part "
+    "102-74\") instead of copying its full stated text including status "
+    "markers (\"...appendix A to part 102-74, Rules and Regulations "
+    "Governing Conduct on Federal Property (removed)\") -- both were "
+    "otherwise-correct answers that lost purely because the wording "
+    "didn't match the specific passage the question pointed at. "
     "When the answer is a structured list that the question asked to "
     "order by a numeric field, emit it in that exact order (use "
     "`compute` to sort if needed) -- a correctly identified list in the "
@@ -1046,12 +1109,18 @@ async def _run_loop(
             # going back for the rest, even with turns and budget to
             # spare. Catch its own admission and send it back rather than
             # finalizing an answer it already knows is incomplete.
-            if (
-                _turn < MAX_LOOP_TURNS - 1
-                and not state.past_soft_deadline()
-                and not state.budget_is_low()
-                and _INCOMPLETE_COVERAGE_RE.search(text or "")
-            ):
+            # 2026-08-21: dropped the "turns/budget left" guard this branch
+            # used to have (unlike the TOOL_MARKUP branch above, which never
+            # had one). On a real production loss (task e900abf6) the guard
+            # was false at the exact turn this fired, so the code fell
+            # through to `return text` and shipped the raw self-admission
+            # -- trailed by a leaked tool-call token, see _TOOL_MARKUP_RE --
+            # as the final answer. `continue` here is just as safe as the
+            # TOOL_MARKUP branch: the loop's own top-of-loop deadline/budget
+            # check breaks it on the next iteration if time really is out,
+            # and the post-loop `_force_final_answer` rescue still produces
+            # a clean, tool-free answer instead of raw narration.
+            if _INCOMPLETE_COVERAGE_RE.search(text or ""):
                 messages.append(message.to_input_message())
                 messages.append(
                     {
@@ -1700,7 +1769,7 @@ async def _audit_answer(question: str, answer: str, store: EvidenceStore, state:
             "role": "system",
             "content": (
                 "You are a strict answer auditor. Check the draft answer "
-                "against the question and the evidence on thirteen things: "
+                "against the question and the evidence on fifteen things: "
                 "(1) FORMAT -- does it follow the question's literal "
                 "formatting/precision instructions exactly (notation, "
                 "digit precision, ordering, units), with no rounding or "
@@ -1766,9 +1835,20 @@ async def _audit_answer(question: str, answer: str, store: EvidenceStore, state:
                 "requires proving exactly one / the only entry meets a "
                 "criterion, does the draft's evidence also show a few "
                 "eliminated near-misses that fail that criterion, not only "
-                "the winner. "
+                "the winner; (14) SOURCE COVERAGE -- for every distinct "
+                "number or fact the draft derives from a specific table or "
+                "passage (not general knowledge), does the evidence "
+                "actually include that specific table/passage, not just an "
+                "adjacent or related one from the same document -- a "
+                "correct value derived from an uncited source scores the "
+                "same as an unsupported guess; (15) AS-CITED WORDING -- if "
+                "the question asks for wording \"as given in\" a specific "
+                "citation, instruction, or passage, does the draft match "
+                "that exact passage's own phrasing rather than a more "
+                "complete, formal, or generally-known version of the same "
+                "name from elsewhere. "
                 "If "
-                "the draft fully passes all thirteen, repeat it unchanged, "
+                "the draft fully passes all fifteen, repeat it unchanged, "
                 "including every [[n]] citation marker exactly as written. "
                 "If it fails one, output a corrected version that fixes "
                 "only that issue and keeps every [[n]] marker in place -- "

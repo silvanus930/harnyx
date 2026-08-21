@@ -496,6 +496,80 @@ async def test_leaked_tool_call_markup_is_rejected_not_shipped_as_answer(
     assert "Evidence gathered for" in result.text
 
 
+async def test_leaked_native_tool_call_token_is_rejected_not_shipped_as_answer(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Real diagnosed production loss (task e900abf6, batch 81b84664): a
+    # provider leaked its native tool-call control token instead of parsing
+    # it into a real tool call, ending the "final" answer mid-sentence with
+    # "...I will now search for the current STD index (August 2026).
+    # <｜DSML｜funct". This shipped as-is because the XML-only
+    # _TOOL_MARKUP_RE pattern didn't match a non-XML leaked token.
+    results = [
+        {"index": 0, "result_id": "r-1", "url": "https://example.com/a", "note": "Alpha evidence", "title": "Alpha"}
+    ]
+    call_count = {"n": 0}
+
+    async def fake_search_web(*_: object, **__: object) -> ToolCallResponse[SearchWebSearchResponse]:
+        return _search_response(results)
+
+    async def fake_llm_chat(**__: object) -> LlmChatResult:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _tool_call_chat_result("search", {"query": "the question"})
+        if call_count["n"] in (2, 3):
+            return _text_chat_result(
+                "I will now search for the current index. <｜DSML｜funct"
+            )
+        return _text_chat_result("no")
+
+    monkeypatch.setattr(agent, "search_web", fake_search_web)
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+
+    result = await agent.query(Query(text="What does the evidence say?"))
+
+    assert "<｜" not in result.text
+    assert "Evidence gathered for" in result.text
+
+
+async def test_loop_retries_on_new_self_admission_phrasings(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Real diagnosed production loss (task e900abf6): the give-up wording
+    # was "I have not yet fetched..." / "I need to obtain X before I can
+    # determine..." / "I will now search for...", none of which the older
+    # verb-list patterns matched (different tense, and a positive "before I
+    # can" rather than "cannot"), so it shipped as the final answer instead
+    # of triggering the existing retry-with-more-search mechanism.
+    results = [
+        {"index": 0, "result_id": "r-1", "url": "https://example.com/a", "note": "STD data", "title": "Index"}
+    ]
+    call_count = {"n": 0}
+
+    async def fake_search_web(*_: object, **__: object) -> ToolCallResponse[SearchWebSearchResponse]:
+        return _search_response(results)
+
+    async def fake_llm_chat(**__: object) -> LlmChatResult:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _text_chat_result(
+                "I have not yet fetched the current STD index. I need to "
+                "obtain it before I can determine the answer. I will now "
+                "search for the current STD index."
+            )
+        if call_count["n"] == 2:
+            return _tool_call_chat_result("search", {"query": "current STD index"})
+        return _text_chat_result("STD 1 differs [[1]].")
+
+    monkeypatch.setattr(agent, "search_web", fake_search_web)
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+
+    result = await agent.query(Query(text="Which STD numbers differ?"))
+
+    assert "I will now search" not in result.text
+    assert "STD 1 differs" in result.text
+
+
 async def test_low_budget_skips_structured_output_llm_calls(
     agent: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1401,6 +1475,54 @@ def test_system_prompt_covers_verified_pairing(agent: ModuleType) -> None:
     assert "A category's own total and one member's individual figure are NOT the same thing" in prompt
 
 
+def test_system_prompt_covers_as_cited_wording(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "AS-GIVEN-IN-THE-CITATION WORDING" in prompt
+    assert "Leroy P. Steele Prize" in prompt
+
+
+def test_system_prompt_covers_conditional_values(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "CONDITIONAL VALUES" in prompt
+    assert "depending on whether 8 or 10 lanes" in prompt
+
+
+def test_system_prompt_covers_title_matching_normalization_and_exclusion(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "matching NAMES or TITLES across two lists" in prompt
+    assert "different sequels, different editions, different years" in prompt
+
+
+def test_system_prompt_covers_explicit_list_before_tally(agent: ModuleType) -> None:
+    prompt = agent._LOOP_SYSTEM_PROMPT
+    assert "write out the" in prompt
+    assert "explicit list of every row's own identifier" in prompt
+
+
+async def test_audit_prompt_covers_source_coverage_and_as_cited_checks(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen_prompts: list[str] = []
+
+    async def fake_llm_chat(**kwargs: object) -> LlmChatResult:
+        messages = kwargs["messages"]  # type: ignore[index]
+        seen_prompts.append(str(messages[0]["content"]))  # type: ignore[index]
+        return _text_chat_result("An answer with [[0]] citation that is long enough to pass the length check.")
+
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note="some evidence")
+    state = agent.RunState()
+
+    await agent._audit_answer("q", "A draft answer with [[0]] citation, long enough to be usable.", store, state)
+
+    assert seen_prompts
+    audit_prompt = seen_prompts[0]
+    assert "on fifteen things" in audit_prompt
+    assert "SOURCE COVERAGE" in audit_prompt
+    assert "AS-CITED WORDING" in audit_prompt
+
+
 async def test_audit_prompt_covers_case_and_pairing_checks(
     agent: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1420,7 +1542,7 @@ async def test_audit_prompt_covers_case_and_pairing_checks(
 
     assert seen_prompts
     audit_prompt = seen_prompts[0]
-    assert "on thirteen things" in audit_prompt
+    assert "on fifteen things" in audit_prompt
     assert "CASE/DIACRITIC FIDELITY" in audit_prompt
     assert "VERIFIED PAIRING" in audit_prompt
 
