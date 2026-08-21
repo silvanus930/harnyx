@@ -1616,6 +1616,103 @@ async def test_audit_prompt_covers_case_and_pairing_checks(
     assert "VERIFIED PAIRING" in audit_prompt
 
 
+async def test_audit_answer_rejects_rewrite_that_drops_a_figure(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Adapted from a mechanism in the current champion's own source: an
+    # audit rewrite that silently drops a number present in the pre-audit
+    # draft is more likely a regression than a genuine fix, so it should be
+    # rejected in favor of the original draft even though the rewrite is
+    # itself well-formed and "usable" on its own.
+    async def fake_llm_chat(**__: object) -> LlmChatResult:
+        return _text_chat_result("The total was 42 items [[0]], now missing the other figure entirely here.")
+
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note="some evidence")
+    state = agent.RunState()
+
+    draft = "The total was 42 items [[0]] out of 17 candidates checked in full."
+    result = await agent._audit_answer("q", draft, store, state)
+
+    assert result == draft
+
+
+async def test_audit_answer_accepts_legitimate_figure_correction(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A genuine 1-for-1 correction (wrong figure swapped for the right one)
+    # must NOT be rejected by the drop-guard -- it keeps the same COUNT of
+    # distinct figures, just a different specific value, which is exactly
+    # what the audit prompt's own FORMAT/FABRICATION checks are meant to do.
+    async def fake_llm_chat(**__: object) -> LlmChatResult:
+        return _text_chat_result("The total was 45 items [[0]] out of 17 candidates checked in full.")
+
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note="some evidence")
+    state = agent.RunState()
+
+    draft = "The total was 42 items [[0]] out of 17 candidates checked in full."
+    result = await agent._audit_answer("q", draft, store, state)
+
+    assert "45 items" in result
+
+
+async def test_audit_answer_accepts_rewrite_that_preserves_figures_and_entities(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_llm_chat(**__: object) -> LlmChatResult:
+        return _text_chat_result("The total was 42 items [[0]] out of 17 Candidate Rows checked, corrected wording.")
+
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note="some evidence")
+    state = agent.RunState()
+
+    draft = "The total was 42 items [[0]] out of 17 Candidate Rows checked."
+    result = await agent._audit_answer("q", draft, store, state)
+
+    assert "corrected wording" in result
+
+
+def test_is_usable_answer_rejects_degenerate_repetition(agent: ModuleType) -> None:
+    repeated = "the same short phrase repeats " * 40
+    assert not agent._is_usable_answer(repeated)
+
+
+def test_is_usable_answer_accepts_normal_prose(agent: ModuleType) -> None:
+    normal = (
+        "This is a normal, varied answer with plenty of distinct words "
+        "describing different facts gathered from several sources [[1]]."
+    )
+    assert agent._is_usable_answer(normal)
+
+
+def test_snap_structured_to_verbatim_casing_fixes_mismatched_case(agent: ModuleType) -> None:
+    store = agent.EvidenceStore()
+    store.add(
+        receipt_id="r",
+        result_id="r-1",
+        url="https://example.com/a",
+        title="T",
+        note="The glacier register lists WOLVERINE among the reference glaciers.",
+    )
+
+    result = agent._snap_structured_to_verbatim_casing({"name": "Wolverine"}, store)
+
+    assert result == {"name": "WOLVERINE"}
+
+
+def test_snap_structured_to_verbatim_casing_leaves_unmatched_value_untouched(agent: ModuleType) -> None:
+    store = agent.EvidenceStore()
+    store.add(receipt_id="r", result_id="r-1", url="https://example.com/a", title="T", note="unrelated content")
+
+    result = agent._snap_structured_to_verbatim_casing({"name": "Nonexistent Entry"}, store)
+
+    assert result == {"name": "Nonexistent Entry"}
+
+
 def test_normalize_citation_markers_upgrades_bare_marker_to_double_bracket(
     agent: ModuleType,
 ) -> None:

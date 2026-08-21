@@ -1086,6 +1086,7 @@ async def _run_query(query: Query) -> Response:
         return Response(text=text_answer, citations=citations)
 
     structured = await _build_structured_output(query, store, text_answer, state)
+    structured = _snap_structured_to_verbatim_casing(structured, store)
     # 2026-08-20: real diagnosed pairwise losses -- structured tasks lost
     # with correct JSON because citations were built from the loop's prose
     # BEFORE the schema JSON existed, so answer-derived proof spans never
@@ -1809,13 +1810,74 @@ async def _finalize_answer(
     return _NO_ANSWER_STUB
 
 
+# 2026-08-21: defensive check adapted from a pattern found in the current
+# champion's own source (a comparable degenerate-output guard). We have not
+# diagnosed this failure mode ourselves yet, but a stuck/looping model
+# response is a known LLM failure shape worth guarding against cheaply
+# (pure string ops, no LLM call) rather than shipping a repeated fragment
+# as a "usable" answer just because it clears the length floor.
+_DEGENERATE_MIN_CHARS = 200
+_DEGENERATE_CHUNK_LENS = (20, 40, 80)
+_DEGENERATE_MIN_REPEATS = 4
+_DEGENERATE_MIN_UNIQUE_WORD_RATIO = 0.2
+
+
+def _looks_like_stuck_repetition(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped) < _DEGENERATE_MIN_CHARS:
+        return False
+    words = stripped.split()
+    if len(words) >= 20:
+        unique_ratio = len(set(words)) / len(words)
+        if unique_ratio < _DEGENERATE_MIN_UNIQUE_WORD_RATIO:
+            return True
+    for chunk_len in _DEGENERATE_CHUNK_LENS:
+        if len(stripped) < chunk_len * _DEGENERATE_MIN_REPEATS:
+            continue
+        chunk = stripped[:chunk_len]
+        if chunk.strip() and stripped.count(chunk) >= _DEGENERATE_MIN_REPEATS:
+            return True
+    return False
+
+
 def _is_usable_answer(text: str | None) -> bool:
     if not text:
         return False
     stripped = text.strip()
     if len(stripped) < MIN_USABLE_ANSWER_CHARS or stripped == _NO_ANSWER_STUB:
         return False
-    return not _TOOL_MARKUP_RE.search(stripped)
+    if _TOOL_MARKUP_RE.search(stripped):
+        return False
+    return not _looks_like_stuck_repetition(stripped)
+
+
+# 2026-08-21: adapted from a mechanism found in the current champion's own
+# source (compare pre/post-audit answers before trusting the rewrite,
+# rather than accepting it unconditionally). We only ever checked whether
+# the AUDITED answer was itself usable, never whether the audit's "fix"
+# silently deleted a number or named entity that was actually correct in
+# the pre-audit draft -- an overzealous rewrite that drops real content
+# while fixing an unrelated issue would sail through undetected. Reusing
+# _answer_anchors (already built for citation retargeting) for the entity
+# side keeps this to one extraction pass, not a second parallel system.
+_NUMERIC_TOKEN_RE = re.compile(r"\d[\d,]*\.?\d*")
+
+
+def _numeric_tokens_in(text: str) -> set[str]:
+    return {match.group(0).replace(",", "") for match in _NUMERIC_TOKEN_RE.finditer(text or "")}
+
+
+def _audit_dropped_content(draft: str, audited: str) -> bool:
+    # Count-based, not an exact-subset check: the audit prompt's own job
+    # includes genuine 1-for-1 corrections (a wrong figure swapped for the
+    # right one, a fabricated placeholder replaced with a real value) --
+    # those keep the same number of distinct figures/entities but change
+    # which ones, and must not be rejected. Only a net LOSS in count (the
+    # rewrite ends up with fewer than the draft had) signals real content
+    # deleted rather than corrected.
+    if len(_numeric_tokens_in(audited)) < len(_numeric_tokens_in(draft)):
+        return True
+    return len(_answer_anchors(audited)) < len(_answer_anchors(draft))
 
 
 async def _audit_answer(question: str, answer: str, store: EvidenceStore, state: RunState) -> str:
@@ -1927,7 +1989,11 @@ async def _audit_answer(question: str, answer: str, store: EvidenceStore, state:
         },
     ]
     audited = await _call_synthesis(messages, state)
-    return audited if _is_usable_answer(audited) else answer
+    if not _is_usable_answer(audited):
+        return answer
+    if _audit_dropped_content(answer, audited):
+        return answer
+    return audited
 
 
 async def _write_from_digest(question: str, store: EvidenceStore, state: RunState) -> str | None:
@@ -2397,6 +2463,53 @@ def _build_citations(question: str, text: str, store: EvidenceStore) -> tuple[st
 # --------------------------------------------------------------------------
 # Structured output
 # --------------------------------------------------------------------------
+
+
+# 2026-08-21: adapted from a mechanism found in the current champion's own
+# source (deterministically snap output values back to the source's exact
+# printed casing/spelling). This complements the AS-GIVEN-IN-THE-CITATION
+# and CASE/DIACRITIC FIDELITY prompt guidance with a code-level safety net
+# for exactly the class of bug that guidance targets -- WOLVERINE, "End of
+# mission", "Steele Prize for..." -- with no LLM cost and no risk of
+# inventing anything: it only ever fires when the value is NOT already an
+# exact substring of gathered evidence but a case-insensitive match IS, so
+# a value with no real source match, or one already verbatim, is untouched.
+_VERBATIM_SNAP_MIN_CHARS = 4
+
+
+def _snap_string_to_verbatim_casing(value: str, notes: tuple[str, ...]) -> str:
+    candidate = value.strip()
+    if len(candidate) < _VERBATIM_SNAP_MIN_CHARS:
+        return value
+    if any(candidate in note for note in notes):
+        return value
+    lowered = candidate.lower()
+    for note in notes:
+        idx = note.lower().find(lowered)
+        if idx == -1:
+            continue
+        found = note[idx : idx + len(candidate)]
+        return found if found and found != candidate else value
+    return value
+
+
+def _snap_verbatim_recursive(obj: Any, notes: tuple[str, ...], *, depth: int = 0) -> Any:
+    if depth > 6:
+        return obj
+    if isinstance(obj, str):
+        return _snap_string_to_verbatim_casing(obj, notes)
+    if isinstance(obj, list):
+        return [_snap_verbatim_recursive(item, notes, depth=depth + 1) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _snap_verbatim_recursive(val, notes, depth=depth + 1) for key, val in obj.items()}
+    return obj
+
+
+def _snap_structured_to_verbatim_casing(obj: Any, store: EvidenceStore) -> Any:
+    notes = tuple(item.note or "" for item in store.items)
+    if not notes:
+        return obj
+    return _snap_verbatim_recursive(obj, notes)
 
 
 async def _build_structured_output(
