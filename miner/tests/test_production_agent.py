@@ -570,6 +570,44 @@ async def test_loop_retries_on_new_self_admission_phrasings(
     assert "STD 1 differs" in result.text
 
 
+async def test_loop_retries_on_second_round_self_admission_phrasing(
+    agent: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Real diagnosed retest loss (task a04e5b1b): a second, differently-
+    # worded give-up shipped as the final answer even after the previous
+    # round's phrasings were added -- "the required tables ... are not
+    # included in the excerpts" -- while the actual data was available and
+    # a competing answer found it. Confirms this give-up shape keeps
+    # resurfacing with new synonyms each retest round, not a one-off.
+    results = [
+        {"index": 0, "result_id": "r-1", "url": "https://example.com/a", "note": "Region data", "title": "Tables"}
+    ]
+    call_count = {"n": 0}
+
+    async def fake_search_web(*_: object, **__: object) -> ToolCallResponse[SearchWebSearchResponse]:
+        return _search_response(results)
+
+    async def fake_llm_chat(**__: object) -> LlmChatResult:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _text_chat_result(
+                "Based on the evidence provided, the required tables with "
+                "wave-specific response rates by region are not included "
+                "in the excerpts."
+            )
+        if call_count["n"] == 2:
+            return _tool_call_chat_result("search", {"query": "wave-specific response rates by region"})
+        return _text_chat_result("The matching regions are X and Y [[1]].")
+
+    monkeypatch.setattr(agent, "search_web", fake_search_web)
+    monkeypatch.setattr(agent, "llm_chat", fake_llm_chat)
+
+    result = await agent.query(Query(text="Which regions match?"))
+
+    assert "not included in the excerpts" not in result.text
+    assert "matching regions are X and Y" in result.text
+
+
 async def test_low_budget_skips_structured_output_llm_calls(
     agent: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:

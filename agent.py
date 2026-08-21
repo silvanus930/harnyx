@@ -239,6 +239,18 @@ _INCOMPLETE_COVERAGE_RE = re.compile(
     r"|\bhave not yet \w+\b"
     r"|\bneed(?:s)? to \w+ before (?:I|it) can\b"
     r"|\bI will now (?:search|fetch|open|check|look)\b"
+    # 2026-08-21: real diagnosed retest loss (task a04e5b1b, second distinct
+    # wording for the same give-up shape in as many rounds) -- "the required
+    # tables ... are not included in the excerpts", which the existing
+    # "not (?:provided|included) in the evidence" pattern missed on the noun
+    # alone ("excerpts"/"citations"/"sources"/"material" instead of
+    # "evidence"). Generalizing the noun class rather than adding another
+    # one-off literal, since this exact shape keeps resurfacing with new
+    # synonyms each time.
+    r"|\b(?:is|are|was|were) not included in (?:the )?(?:evidence|excerpts|"
+    r"citations|sources|(?:the )?provided material)\b"
+    r"|\bdata is not available\b"
+    r"|\bfailed to (?:retrieve|recognize) the data\b"
     # 2026-08-18: real diagnosed WebWalkerQA (Multi-Source) loss -- this suite
     # draws bilingual questions, and a Chinese-language answer self-admitted
     # the same "found half, gave up on the rest" gap ("但具体的历史意义内容在
